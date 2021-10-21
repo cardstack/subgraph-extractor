@@ -8,10 +8,11 @@ setup(
     author="Ian Calvert",
     author_email="ian.calvert@cardstack.com",
     license="None",
-    install_requires=["click", "pandas", "sqlalchemy", "psycopg2-binary", "pyarrow"],
+    install_requires=["click", "pandas", "sqlalchemy", "psycopg2-binary", "pyarrow", "simple-term-menu"],
     extras_require={"dev": ["pytest", "black", "isort", "pytest-pep8", "pytest-cov"]},
     entry_points={
-        "console_scripts": ["subgraph_extractor=subgraph_extractor.cli:main"],
+        "console_scripts": ["subgraph_extractor=subgraph_extractor.cli:main",
+        "subgraph_config_generator=subgraph_extractor.cli:config_generator"],
     },
     packages=["subgraph_extractor"],
     zip_safe=False,

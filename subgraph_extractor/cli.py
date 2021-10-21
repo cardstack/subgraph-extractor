@@ -6,6 +6,8 @@ import yaml
 
 import numpy as np
 
+from simple_term_menu import TerminalMenu
+
 TYPE_MAPPINGS = {"numeric": "bytes", "text": "string"}
 
 
@@ -82,11 +84,12 @@ def get_subgraph_schema(subgraph_id, database_string):
     "--subgraph-config",
     type=click.File("r"),
     help="The config file specifying the data to extract",
+    required=True
 )
 @click.option(
     "--database-string",
     default="postgresql://graph-node:let-me-in@localhost:5432/graph-node",
-    help="The database string to connect to",
+    help="The database string for connections, defaults to a local graph-node",
 )
 def main(subgraph_config, database_string):
     """Connects to your database and pulls all data from all subgraphs"""
@@ -170,5 +173,128 @@ def main(subgraph_config, database_string):
                 typed_df.to_parquet(os.path.join(basedir, "data.parquet"))
 
 
-if __name__ == "__main__":
-    main()
+
+def get_tables_in_schema(database_string, table_schema, ignored_tables=[]):
+    all_tables = pandas.read_sql(
+        f"""
+    SELECT table_name FROM information_schema.tables 
+    WHERE table_schema = '{table_schema}'
+    """,
+        con=database_string,
+    )["table_name"].tolist()
+    return sorted(list(set(all_tables) - set(ignored_tables)))
+
+
+def get_subgraph_schemas(database_string):
+    schema_lookup = {}
+    schema_data = pandas.read_sql(
+        f"""
+    SELECT
+  ds.subgraph AS subgraph_id,
+  ds.name AS table_schema,
+  sv.id,
+  s.name as label
+FROM
+  deployment_schemas ds
+  LEFT JOIN subgraphs.subgraph_version sv ON (ds.subgraph = sv.deployment)
+  LEFT JOIN subgraphs.subgraph s ON (s.current_version = sv.id)
+WHERE
+  ds.active
+    """,
+        con=database_string,
+    ).to_dict("records")
+    for subgraph in schema_data:
+        schema_lookup[subgraph['label']] = subgraph
+    return schema_lookup
+
+
+
+@click.command()
+@click.option(
+    "--config-location",
+    help="The output file location for this config",
+    required=True
+)
+@click.option(
+    "--database-string",
+    default="postgresql://graph-node:let-me-in@localhost:5432/graph-node",
+    help="The database string for connections, defaults to a local graph-node",
+)
+def config_generator(config_location, database_string):
+    # Minimise the width any particular column can use in the preview
+    pandas.set_option('display.max_colwidth', 8)
+    # Let pandas figure out the width of the terminal
+    pandas.set_option('display.width', None)
+
+    config = {}
+
+    subgraph_schemas = get_subgraph_schemas(database_string)
+    def preview_schema_data(label):
+        schema = subgraph_schemas[label]
+        table_spacer = "\n - "
+        table_list = get_tables_in_schema(database_string, schema["table_schema"])
+        table_list_formatted = table_spacer + table_spacer.join(table_list)
+        # Make nicer
+        return f"""
+Subgraph: {schema["subgraph_id"]}
+Tables ({len(table_list)}): {table_list_formatted}
+"""
+    options = list(subgraph_schemas.keys())
+    terminal_menu = TerminalMenu(options, title="Please select the subgraph you want to extract", preview_command=preview_schema_data, preview_size=0.75)
+    menu_entry_index = terminal_menu.show()
+    schema_data = subgraph_schemas[options[menu_entry_index]]
+    table_schema = schema_data["table_schema"]
+    config["id"] = schema_data["subgraph_id"]
+
+    tables = get_tables_in_schema(database_string, table_schema)
+
+    def preview_table_data(table):
+        subset = pandas.read_sql(f"select * from {table_schema}.{table} limit 10", con=database_string)
+        return str(subset.head())
+    terminal_menu = TerminalMenu(tables, title="Please select the tables you want to extract", preview_command=preview_table_data, preview_size=0.75, multi_select=True)
+    table_entry_index = terminal_menu.show()
+    selected_tables = [tables[index] for index in table_entry_index]
+
+
+    def preview_column(label):
+        schema = subgraph_schemas[label]
+        table_spacer = "\n - "
+        table_list = get_tables_in_schema(database_string, schema["table_schema"])
+        table_list_formatted = table_spacer + table_spacer.join(table_list)
+        # Make nicer
+        return f"""
+Subgraph: {schema["subgraph_id"]}
+Tables ({len(table_list)}): {table_list_formatted}
+"""
+
+    config["tables"] = {}
+    for table in selected_tables:
+        table_config = {}
+        column_types = get_column_types(database_string, table_schema, table)
+        column_names = sorted(list(column_types.keys()))
+        terminal_menu = TerminalMenu(column_names, title=f"Please select the partition column for table {table}")
+        partition_index = terminal_menu.show()
+        partition_column = column_names[partition_index]
+        table_config["partition"] = partition_column
+        table_config["partition_sizes"] = [1024]
+        
+        numeric_columns = sorted([column for column, data_type in column_types.items() if data_type == 'numeric'])
+
+        if len(numeric_columns) > 0:
+            terminal_menu = TerminalMenu(numeric_columns, title=f"These columns are numeric and will be exported as bytes unless they are mapped, which should be mapped to another type?", multi_select=True)
+            mapped_indices = terminal_menu.show()
+            selected_columns = [numeric_columns[index] for index in mapped_indices]
+            if len(selected_columns) > 0:
+                table_config["column_mappings"] = {}
+                for column in selected_columns:
+                    table_config["column_mappings"][column] = {
+                        f"{column}_uint64": {
+                            "type": "uint64",
+                            "max_value": 0xFFFFFFFFFFFFFFFF,
+                            "default": 0,
+                            "validity_column": f"{column}_uint64_valid"
+                        }
+                    }
+        config["tables"][table] = table_config
+    with open(config_location, "w") as f_out:
+        yaml.dump(config, f_out)
