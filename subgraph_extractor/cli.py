@@ -2,11 +2,16 @@ import os
 
 import click
 import pandas
+import yaml
 
-import sqlalchemy
+TYPE_MAPPINGS = {
+    'numeric': 'bytes',
+    #'bytea': 'bytes',
+    'text': 'string'
+}
 
 def get_select_all_exclusive(
-    database_string, table_schema, table_name, start_block=None, end_block=None, ignored_columns=[]
+    database_string, table_schema, table_name, partition_column, start_partition=None, end_partition=None, ignored_columns=[]
 ):
     """Returns a select all statement excluding certain columns"""
     if len(ignored_columns) > 0:
@@ -16,10 +21,10 @@ def get_select_all_exclusive(
         ignored_column_string = ""
     
     where_clauses = []
-    if start_block:
-        where_clauses.append(f"block_number >= {start_block}")
-    if end_block:
-        where_clauses.append(f"block_number < {end_block}")
+    if start_partition:
+        where_clauses.append(f"{partition_column} >= {start_partition}")
+    if end_partition:
+        where_clauses.append(f"{partition_column} < {end_partition}")
     
     if len(where_clauses) > 0:
         where_clause = f"WHERE {' AND '.join(where_clauses)}"
@@ -32,7 +37,7 @@ def get_select_all_exclusive(
                 'SELECT ' || STRING_AGG('"' || column_name || '"', ', ') || ' 
                     FROM {table_schema}.{table_name}
                     {where_clause} 
-                    ORDER BY block_number'
+                    ORDER BY {partition_column}'
             FROM information_schema.columns
             WHERE table_name = '{table_name}'
             AND table_schema = '{table_schema}'
@@ -42,78 +47,94 @@ def get_select_all_exclusive(
     ).iloc[0][0]
 
 
-def get_tables_in_schema(database_string, table_schema, ignored_tables=[]):
-    all_tables = pandas.read_sql(
-        f"""
-    SELECT table_name FROM information_schema.tables 
-    WHERE table_schema = '{table_schema}'
-    """,
+def get_column_types(database_string, table_schema, table_name):
+    df = pandas.read_sql(
+        sql=f"""SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_name = '{table_name}'
+                AND table_schema = '{table_schema}'
+            """,
         con=database_string,
-    )["table_name"].tolist()
-    return list(set(all_tables) - set(ignored_tables))
+    )
+    column_types = {}
+    for row in df.to_dict('records'):
+        column_types[row['column_name']] = row['data_type']
+    return column_types
 
-
-def get_subgraph_schemas(database_string):
+def get_subgraph_schema(subgraph_id, database_string):
     return pandas.read_sql(
         f"""
     SELECT subgraph as subgraph_id, name as table_schema from deployment_schemas
+    where subgraph = %(subgraph_id)s
     """,
+        params={"subgraph_id": subgraph_id},
         con=database_string,
-    ).to_dict("records")
+    ).to_dict("records")[0]
 
 
 @click.command()
+@click.option("--subgraph-config", type=click.File('r'), help="The config file specifying the data to extract")
 @click.option(
     "--database-string",
     default="postgresql://graph-node:let-me-in@localhost:5432/graph-node",
     help="The database string to connect to",
 )
-def main(database_string):
+def main(subgraph_config, database_string):
     """Connects to your database and pulls all data from all subgraphs"""
 
-    for subgraph in get_subgraph_schemas(database_string):
-        table_schema = subgraph["table_schema"]
-        subgraph_id = subgraph["subgraph_id"]
-        # We can ignore this auto-created table, the others should all be
-        # explicitly created mappings
-        tables = get_tables_in_schema(database_string, table_schema, ["poi2$"])
-        # We need to get the column names and have to explicity exclude some
-        for table_name in tables:
-            # Assume all are workable by block like this
-            # TODO: check for this column and do a timestamped export if not
-            try:
-                limits_df = pandas.read_sql(
-                    sql=f"select min(block_number) as min_block, max(block_number) as max_block from {table_schema}.{table_name}",
+    config = yaml.safe_load(subgraph_config)
+    subgraph = get_subgraph_schema(config['id'], database_string)
+    print(subgraph, config)
+    table_schema = subgraph["table_schema"]
+    subgraph_id = subgraph["subgraph_id"]
+    for table_name, table_config in config['tables'].items():
+        partition_column = table_config['partition']
+        limits_df = pandas.read_sql(
+            sql=f"select min({partition_column}) as min_partition, max({partition_column}) as max_partition from {table_schema}.{table_name}",
+            con=database_string,
+            coerce_float=False)
+        print(limits_df)
+        min_partition= int(limits_df['min_partition'].iloc[0])
+        max_partition = int(limits_df['max_partition'].iloc[0])
+        for partition_size in table_config['partition_sizes']:
+            print(partition_size)
+            # Floor the ranges
+            start_partition_allowed = (min_partition // partition_size)*partition_size
+            end_partition_allowed = (max_partition // partition_size)*partition_size
+            print(start_partition_allowed, end_partition_allowed)
+            for start_partition in range(start_partition_allowed, end_partition_allowed, partition_size):
+                end_partition = start_partition + partition_size
+                df = pandas.read_sql(
+                    sql=get_select_all_exclusive(
+                        database_string, table_schema, table_name,
+                        partition_column,
+                        start_partition=start_partition,
+                        end_partition=end_partition,
+                        ignored_columns=["vid", "block_range"]
+                    ),
                     con=database_string,
-                    coerce_float=False)
-                min_block = int(limits_df['min_block'].iloc[0])
-                max_block = int(limits_df['max_block'].iloc[0])
-                for granularity in [32**2, 32**3]:
-                    # Floor the ranges
-                    start_block_allowed = (min_block // granularity)*granularity
-                    end_block_allowed = (max_block // granularity)*granularity
-                    for start_block in range(start_block_allowed, end_block_allowed, granularity):
-                        end_block = start_block + granularity
-                        df = pandas.read_sql(
-                            sql=get_select_all_exclusive(
-                                database_string, table_schema, table_name,
-                                start_block=start_block,
-                                end_block=end_block,
-                                ignored_columns=["vid", "block_range"]
-                            ),
-                            con=database_string,
-                            coerce_float=False,
-                        )
-                        basedir = os.path.join(
-                            "data", f"subgraph={subgraph_id}", f"table={table_name}",
-                            f"granularity={granularity}",
-                            f"start_block={start_block}",
-                            f"end_block={end_block}",
-                        )
-                        os.makedirs(basedir, exist_ok=True)
-                        df.to_parquet(os.path.join(basedir, "data.parquet"))
-            except sqlalchemy.exc.ProgrammingError as e:
-                print("skipping table", table_name, e)
+                    coerce_float=False,
+                )
+                basedir = os.path.join(
+                    "data", f"subgraph={subgraph_id}", f"table={table_name}",
+                    f"partition_size={partition_size}",
+                    f"start_partition={start_partition}",
+                    f"end_partition={end_partition}",
+                )
+                os.makedirs(basedir, exist_ok=True)
+                # Get the column types
+                database_types = get_column_types(database_string, table_schema, table_name)
+                print(database_types)
+                print(df.dtypes[0])
+                update_types = {}
+                for column_name in df.columns:
+                    database_type = database_types[column_name]
+                    if database_type in TYPE_MAPPINGS:
+                        update_types[column_name] = TYPE_MAPPINGS[database_type]
+                print(update_types)
+                typed_df = df.astype(update_types)
+                print(typed_df.dtypes)
+                typed_df.to_parquet(os.path.join(basedir, "data.parquet"))
 
 
 if __name__ == "__main__":
