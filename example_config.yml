@@ -1,0 +1,24 @@
+id: "QmYaB8ofSfcySwm94gnZeWcvWCk2UyVaWer4zCJu3kUEhp"
+tables:
+  token_transfer:
+    partition: "block_number"
+    partition_sizes: [1024, 32768]
+    column_mappings:
+      block_number:
+        block_number_uint32:
+          type: uint32
+      timestamp:
+        timestamp_uint32: 
+          type: uint32
+      value:
+        value_uint64:
+          type: uint64
+          max_value: 0xFFFFFFFFFFFFFFFF
+          default: 0
+          validity_column: value_uint64_valid
+      token_id:
+        token_id_uint32:
+          type: uint32
+          max_value: 0xFFFFFFFF
+          default: 0
+          validity_column: token_id_uint32_valid

@@ -4,9 +4,10 @@ import click
 import pandas
 import yaml
 
+import numpy as np
+
 TYPE_MAPPINGS = {
     'numeric': 'bytes',
-    #'bytea': 'bytes',
     'text': 'string'
 }
 
@@ -124,16 +125,27 @@ def main(subgraph_config, database_string):
                 os.makedirs(basedir, exist_ok=True)
                 # Get the column types
                 database_types = get_column_types(database_string, table_schema, table_name)
-                print(database_types)
-                print(df.dtypes[0])
                 update_types = {}
                 for column_name in df.columns:
                     database_type = database_types[column_name]
                     if database_type in TYPE_MAPPINGS:
                         update_types[column_name] = TYPE_MAPPINGS[database_type]
-                print(update_types)
+                new_column_settings = {}
+                for column, mappings in table_config['column_mappings'].items():
+                    for new_column_name, new_column_config in mappings.items():
+                        if new_column_config.get('max_value'):
+                            max_value = new_column_config['max_value']
+                            validity_column = new_column_config['validity_column']
+                            default = new_column_config['default']
+                            new_column_settings[new_column_name] = np.where(df[column] <= max_value, df[column], default)
+                            new_column_settings[validity_column] = np.where(df[column] <= max_value, True, False)
+                            update_types[validity_column] = 'boolean'
+                        else:
+                            new_column_settings[new_column_name] = df[column]
+                        update_types[new_column_name] = new_column_config['type']
+                
+                df = df.assign(**new_column_settings)
                 typed_df = df.astype(update_types)
-                print(typed_df.dtypes)
                 typed_df.to_parquet(os.path.join(basedir, "data.parquet"))
 
 
