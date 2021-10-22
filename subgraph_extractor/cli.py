@@ -33,11 +33,7 @@ def get_select_all_exclusive(
     if end_partition:
         where_clauses.append(f"{partition_column} < {end_partition}")
 
-    if len(where_clauses) > 0:
-        where_clause = f"WHERE {' AND '.join(where_clauses)}"
-    else:
-        where_clause = ""
-
+    where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     return pandas.read_sql(
         sql=f"""SELECT 
                 'SELECT ' || STRING_AGG('"' || column_name || '"', ', ') || ' 
@@ -62,15 +58,12 @@ def get_column_types(database_string, table_schema, table_name):
             """,
         con=database_string,
     )
-    column_types = {}
-    for row in df.to_dict("records"):
-        column_types[row["column_name"]] = row["data_type"]
-    return column_types
+    return {row["column_name"]: row["data_type"] for row in df.to_dict("records")}
 
 
 def get_subgraph_schema(subgraph_id, database_string):
     return pandas.read_sql(
-        f"""
+        """
     SELECT subgraph as subgraph_id, name as table_schema from deployment_schemas
     where subgraph = %(subgraph_id)s
     """,
@@ -84,7 +77,7 @@ def get_subgraph_schema(subgraph_id, database_string):
     "--subgraph-config",
     type=click.File("r"),
     help="The config file specifying the data to extract",
-    required=True
+    required=True,
 )
 @click.option(
     "--database-string",
@@ -173,7 +166,6 @@ def main(subgraph_config, database_string):
                 typed_df.to_parquet(os.path.join(basedir, "data.parquet"))
 
 
-
 def get_tables_in_schema(database_string, table_schema, ignored_tables=[]):
     all_tables = pandas.read_sql(
         f"""
@@ -186,9 +178,8 @@ def get_tables_in_schema(database_string, table_schema, ignored_tables=[]):
 
 
 def get_subgraph_schemas(database_string):
-    schema_lookup = {}
     schema_data = pandas.read_sql(
-        f"""
+        """
     SELECT
   ds.subgraph AS subgraph_id,
   ds.name AS table_schema,
@@ -203,17 +194,12 @@ WHERE
     """,
         con=database_string,
     ).to_dict("records")
-    for subgraph in schema_data:
-        schema_lookup[subgraph['label']] = subgraph
-    return schema_lookup
-
+    return {subgraph["label"]: subgraph for subgraph in schema_data}
 
 
 @click.command()
 @click.option(
-    "--config-location",
-    help="The output file location for this config",
-    required=True
+    "--config-location", help="The output file location for this config", required=True
 )
 @click.option(
     "--database-string",
@@ -222,13 +208,14 @@ WHERE
 )
 def config_generator(config_location, database_string):
     # Minimise the width any particular column can use in the preview
-    pandas.set_option('display.max_colwidth', 8)
+    pandas.set_option("display.max_colwidth", 8)
     # Let pandas figure out the width of the terminal
-    pandas.set_option('display.width', None)
+    pandas.set_option("display.width", None)
 
     config = {}
 
     subgraph_schemas = get_subgraph_schemas(database_string)
+
     def preview_schema_data(label):
         schema = subgraph_schemas[label]
         table_spacer = "\n - "
@@ -239,8 +226,14 @@ def config_generator(config_location, database_string):
 Subgraph: {schema["subgraph_id"]}
 Tables ({len(table_list)}): {table_list_formatted}
 """
+
     options = list(subgraph_schemas.keys())
-    terminal_menu = TerminalMenu(options, title="Please select the subgraph you want to extract", preview_command=preview_schema_data, preview_size=0.75)
+    terminal_menu = TerminalMenu(
+        options,
+        title="Please select the subgraph you want to extract",
+        preview_command=preview_schema_data,
+        preview_size=0.75,
+    )
     menu_entry_index = terminal_menu.show()
     schema_data = subgraph_schemas[options[menu_entry_index]]
     table_schema = schema_data["table_schema"]
@@ -249,39 +242,48 @@ Tables ({len(table_list)}): {table_list_formatted}
     tables = get_tables_in_schema(database_string, table_schema)
 
     def preview_table_data(table):
-        subset = pandas.read_sql(f"select * from {table_schema}.{table} limit 10", con=database_string)
+        subset = pandas.read_sql(
+            f"select * from {table_schema}.{table} limit 10", con=database_string
+        )
         return str(subset.head())
-    terminal_menu = TerminalMenu(tables, title="Please select the tables you want to extract", preview_command=preview_table_data, preview_size=0.75, multi_select=True)
+
+    terminal_menu = TerminalMenu(
+        tables,
+        title="Please select the tables you want to extract",
+        preview_command=preview_table_data,
+        preview_size=0.75,
+        multi_select=True,
+    )
     table_entry_index = terminal_menu.show()
     selected_tables = [tables[index] for index in table_entry_index]
-
-
-    def preview_column(label):
-        schema = subgraph_schemas[label]
-        table_spacer = "\n - "
-        table_list = get_tables_in_schema(database_string, schema["table_schema"])
-        table_list_formatted = table_spacer + table_spacer.join(table_list)
-        # Make nicer
-        return f"""
-Subgraph: {schema["subgraph_id"]}
-Tables ({len(table_list)}): {table_list_formatted}
-"""
 
     config["tables"] = {}
     for table in selected_tables:
         table_config = {}
         column_types = get_column_types(database_string, table_schema, table)
         column_names = sorted(list(column_types.keys()))
-        terminal_menu = TerminalMenu(column_names, title=f"Please select the partition column for table {table}")
+        terminal_menu = TerminalMenu(
+            column_names, title=f"Please select the partition column for table {table}"
+        )
         partition_index = terminal_menu.show()
         partition_column = column_names[partition_index]
         table_config["partition"] = partition_column
         table_config["partition_sizes"] = [1024]
-        
-        numeric_columns = sorted([column for column, data_type in column_types.items() if data_type == 'numeric'])
+
+        numeric_columns = sorted(
+            [
+                column
+                for column, data_type in column_types.items()
+                if data_type == "numeric"
+            ]
+        )
 
         if len(numeric_columns) > 0:
-            terminal_menu = TerminalMenu(numeric_columns, title=f"These columns are numeric and will be exported as bytes unless they are mapped, which should be mapped to another type?", multi_select=True)
+            terminal_menu = TerminalMenu(
+                numeric_columns,
+                title=f"These columns are numeric and will be exported as bytes unless they are mapped, which should be mapped to another type?",
+                multi_select=True,
+            )
             mapped_indices = terminal_menu.show()
             selected_columns = [numeric_columns[index] for index in mapped_indices]
             if len(selected_columns) > 0:
@@ -292,7 +294,7 @@ Tables ({len(table_list)}): {table_list_formatted}
                             "type": "uint64",
                             "max_value": 0xFFFFFFFFFFFFFFFF,
                             "default": 0,
-                            "validity_column": f"{column}_uint64_valid"
+                            "validity_column": f"{column}_uint64_valid",
                         }
                     }
         config["tables"][table] = table_config
