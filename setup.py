@@ -15,6 +15,7 @@ setup(
         "psycopg2-binary",
         "pyarrow",
         "simple-term-menu",
+        "tqdm"
     ],
     extras_require={"dev": ["pytest", "black", "isort", "pytest-pep8", "pytest-cov"]},
     entry_points={
