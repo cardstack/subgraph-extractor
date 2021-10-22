@@ -268,7 +268,7 @@ Tables ({len(table_list)}): {table_list_formatted}
         partition_index = terminal_menu.show()
         partition_column = column_names[partition_index]
         table_config["partition"] = partition_column
-        table_config["partition_sizes"] = [1024]
+        table_config["partition_sizes"] = [32768]
 
         numeric_columns = sorted(
             [
