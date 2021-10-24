@@ -112,8 +112,18 @@ def convert_columns(df, database_types, table_config):
     return df.astype(update_types)
 
 
+def get_partition_iterator(min_partition, max_partition, partition_sizes):
+    for partition_size in sorted(partition_sizes, reverse=True):
+        start_partition_allowed = (min_partition // partition_size) * partition_size
+        end_partition_allowed = (max_partition // partition_size) * partition_size
+        for start_partition in range(start_partition_allowed, end_partition_allowed, partition_size):
+            yield partition_size, start_partition, start_partition+partition_size
+        min_partition = start_partition+partition_size
+
+
+
 def get_partition_range(
-    database_string, partition_column, partition_size, table_schema, table_name
+    database_string, partition_column, partition_sizes, table_schema, table_name
 ):
     limits_df = pandas.read_sql(
         sql=f"select min({partition_column}) as min_partition, max({partition_column}) as max_partition from {table_schema}.{table_name}",
@@ -122,11 +132,8 @@ def get_partition_range(
     )
     min_partition = int(limits_df["min_partition"].iloc[0])
     max_partition = int(limits_df["max_partition"].iloc[0])
-    # Floor the ranges
-    start_partition_allowed = (min_partition // partition_size) * partition_size
-    end_partition_allowed = (max_partition // partition_size) * partition_size
-    return range(start_partition_allowed, end_partition_allowed, partition_size)
-
+    yield from get_partition_iterator(min_partition, max_partition, partition_sizes)
+    
 
 @click.command()
 @click.option(
@@ -150,19 +157,25 @@ def main(subgraph_config, database_string):
     for table_name, table_config in tqdm(
         config["tables"].items(), leave=False, desc="Tables"
     ):
-        for partition_size in tqdm(
-            table_config["partition_sizes"], leave=False, desc="Partition size"
-        ):
-            partition_column = table_config["partition_column"]
-            partition_range = get_partition_range(
-                database_string,
-                partition_column,
-                partition_size,
-                table_schema,
-                table_name,
+        partition_column = table_config["partition_column"]
+        partition_range = get_partition_range(
+            database_string,
+            partition_column,
+            table_config["partition_sizes"],
+            table_schema,
+            table_name,
+        )
+        for partition_size, start_partition, end_partition in tqdm(partition_range, leave=False, desc="Paritions"):
+            basedir = os.path.join(
+                "data",
+                f"subgraph={subgraph_id}",
+                f"table={table_name}",
+                f"partition_size={partition_size}",
+                f"start_partition={start_partition}",
+                f"end_partition={end_partition}",
             )
-            for start_partition in tqdm(partition_range, leave=False, desc="Paritions"):
-                end_partition = start_partition + partition_size
+            filepath = os.path.join(basedir, "data.parquet")
+            if not os.path.isfile(filepath):
                 df = pandas.read_sql(
                     sql=get_select_all_exclusive(
                         database_string,
@@ -176,21 +189,13 @@ def main(subgraph_config, database_string):
                     con=database_string,
                     coerce_float=False,
                 )
-                basedir = os.path.join(
-                    "data",
-                    f"subgraph={subgraph_id}",
-                    f"table={table_name}",
-                    f"partition_size={partition_size}",
-                    f"start_partition={start_partition}",
-                    f"end_partition={end_partition}",
-                )
-                os.makedirs(basedir, exist_ok=True)
                 # Get the column types
                 database_types = get_column_types(
                     database_string, table_schema, table_name
                 )
                 typed_df = convert_columns(df, database_types, table_config)
-                typed_df.to_parquet(os.path.join(basedir, "data.parquet"))
+                os.makedirs(basedir, exist_ok=True)
+                typed_df.to_parquet(filepath)
 
 
 def get_tables_in_schema(database_string, table_schema, ignored_tables=[]):
