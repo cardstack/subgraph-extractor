@@ -80,44 +80,41 @@ def convert_columns(df, database_types, table_config):
         database_type = database_types[column_name]
         if database_type in TYPE_MAPPINGS:
             update_types[column_name] = TYPE_MAPPINGS[database_type]
-    new_column_settings = {}
+    new_columns = {}
     for column, mappings in table_config["column_mappings"].items():
         for new_column_name, new_column_config in mappings.items():
             scale_factor = new_column_config.get("downscale")
+            if scale_factor:
+                new_column = df[column] // scale_factor
+            else:
+                new_column = df[column]
             if new_column_config.get("max_value"):
                 max_value = new_column_config["max_value"]
                 validity_column = new_column_config["validity_column"]
                 default = new_column_config["default"]
-                if scale_factor:
-                    new_column_settings[new_column_name] = np.where(
-                        df[column]//scale_factor <= max_value, df[column]//scale_factor, default
-                    )
-                    new_column_settings[validity_column] = np.where(
-                        df[column]//scale_factor <= max_value, True, False
-                    )
-                else:
-                    new_column_settings[new_column_name] = np.where(
-                        df[column] <= max_value, df[column], default
-                    )
-                    new_column_settings[validity_column] = np.where(
-                        df[column] <= max_value, True, False
-                    )
+                new_columns[new_column_name] = np.where(
+                    new_column <= max_value, new_column, default
+                )
+                new_columns[validity_column] = np.where(
+                    new_column <= max_value, True, False
+                )
                 update_types[validity_column] = "boolean"
             else:
-                if scale_factor:
-                    new_column_settings[new_column_name] = df[column]//scale_factor
-                else:
-                    new_column_settings[new_column_name] = df[column]
+                new_columns[new_column_name] = new_column
             if new_column_config["type"] == "Numeric38":
-                update_types[new_column_name] = pyarrow.decimal128(precision=38).to_pandas_dtype()
+                update_types[new_column_name] = pyarrow.decimal128(
+                    precision=38
+                ).to_pandas_dtype()
             else:
                 update_types[new_column_name] = new_column_config["type"]
 
-    df = df.assign(**new_column_settings)
+    df = df.assign(**new_columns)
     return df.astype(update_types)
 
 
-def get_partition_range(database_string, partition_column, partition_size, table_schema, table_name):
+def get_partition_range(
+    database_string, partition_column, partition_size, table_schema, table_name
+):
     limits_df = pandas.read_sql(
         sql=f"select min({partition_column}) as min_partition, max({partition_column}) as max_partition from {table_schema}.{table_name}",
         con=database_string,
@@ -128,9 +125,8 @@ def get_partition_range(database_string, partition_column, partition_size, table
     # Floor the ranges
     start_partition_allowed = (min_partition // partition_size) * partition_size
     end_partition_allowed = (max_partition // partition_size) * partition_size
-    return range(
-                start_partition_allowed, end_partition_allowed, partition_size
-            )
+    return range(start_partition_allowed, end_partition_allowed, partition_size)
+
 
 @click.command()
 @click.option(
@@ -151,10 +147,20 @@ def main(subgraph_config, database_string):
     subgraph = get_subgraph_schema(config["id"], database_string)
     table_schema = subgraph["table_schema"]
     subgraph_id = subgraph["subgraph_id"]
-    for table_name, table_config in tqdm(config["tables"].items(), leave=False, desc="Tables"):
-        for partition_size in tqdm(table_config["partition_sizes"], leave=False, desc="Partition size"):
+    for table_name, table_config in tqdm(
+        config["tables"].items(), leave=False, desc="Tables"
+    ):
+        for partition_size in tqdm(
+            table_config["partition_sizes"], leave=False, desc="Partition size"
+        ):
             partition_column = table_config["partition_column"]
-            partition_range = get_partition_range(database_string, partition_column, partition_size, table_schema, table_name)
+            partition_range = get_partition_range(
+                database_string,
+                partition_column,
+                partition_size,
+                table_schema,
+                table_name,
+            )
             for start_partition in tqdm(partition_range, leave=False, desc="Paritions"):
                 end_partition = start_partition + partition_size
                 df = pandas.read_sql(
