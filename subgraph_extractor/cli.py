@@ -122,7 +122,7 @@ def get_partition_iterator(min_partition, max_partition, partition_sizes):
 
 
 
-def get_partition_range(
+def get_partitions(
     database_string, partition_column, partition_sizes, table_schema, table_name
 ):
     limits_df = pandas.read_sql(
@@ -158,7 +158,7 @@ def main(subgraph_config, database_string):
         config["tables"].items(), leave=False, desc="Tables"
     ):
         partition_column = table_config["partition_column"]
-        partition_range = get_partition_range(
+        partition_range = get_partitions(
             database_string,
             partition_column,
             table_config["partition_sizes"],
