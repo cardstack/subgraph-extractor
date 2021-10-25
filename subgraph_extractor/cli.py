@@ -165,7 +165,6 @@ def filter_existing_partitions(table_dir, partitions):
 @click.command()
 @click.option(
     "--subgraph-config",
-    type=click.File("r"),
     help="The config file specifying the data to extract",
     required=True,
 )
@@ -182,7 +181,7 @@ def filter_existing_partitions(table_dir, partitions):
 def main(subgraph_config, database_string, output_location):
     """Connects to your database and pulls all data from all subgraphs"""
 
-    config = yaml.safe_load(subgraph_config)
+    config = yaml.safe_load(AnyPath(subgraph_config).open("r"))
     subgraph = get_subgraph_schema(config["subgraph_id"], database_string)
     table_schema = subgraph["table_schema"]
     subgraph_id = subgraph["subgraph_id"]
