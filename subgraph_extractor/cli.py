@@ -10,6 +10,8 @@ import numpy as np
 from simple_term_menu import TerminalMenu
 from tqdm import tqdm
 
+from cloudpathlib import AnyPath
+
 TYPE_MAPPINGS = {"numeric": "bytes", "text": "string"}
 
 
@@ -116,10 +118,11 @@ def get_partition_iterator(min_partition, max_partition, partition_sizes):
     for partition_size in sorted(partition_sizes, reverse=True):
         start_partition_allowed = (min_partition // partition_size) * partition_size
         end_partition_allowed = (max_partition // partition_size) * partition_size
-        for start_partition in range(start_partition_allowed, end_partition_allowed, partition_size):
-            yield partition_size, start_partition, start_partition+partition_size
-        min_partition = start_partition+partition_size
-
+        for start_partition in range(
+            start_partition_allowed, end_partition_allowed, partition_size
+        ):
+            yield partition_size, start_partition, start_partition + partition_size
+        min_partition = start_partition + partition_size
 
 
 def get_partitions(
@@ -133,7 +136,30 @@ def get_partitions(
     min_partition = int(limits_df["min_partition"].iloc[0])
     max_partition = int(limits_df["max_partition"].iloc[0])
     yield from get_partition_iterator(min_partition, max_partition, partition_sizes)
-    
+
+
+def get_partition_file_location(
+    table_dir, partition_size, start_partition, end_partition
+):
+    return table_dir.joinpath(
+        f"partition_size={partition_size}",
+        f"start_partition={start_partition}",
+        f"end_partition={end_partition}",
+        "data.parquet",
+    )
+
+
+def filter_existing_partitions(table_dir, partitions):
+    # Iterate in reverse until one exists, assume all previous exist
+    # We must iterate forwards for processing so return in the correct order.
+    new_partitions = []
+    for partition in sorted(partitions, reverse=True):
+        if get_partition_file_location(table_dir, *partition).exists():
+            return sorted(new_partitions, reverse=True)
+        else:
+            new_partitions.append(partition)
+    return new_partitions
+
 
 @click.command()
 @click.option(
@@ -147,16 +173,25 @@ def get_partitions(
     default="postgresql://graph-node:let-me-in@localhost:5432/graph-node",
     help="The database string for connections, defaults to a local graph-node",
 )
-def main(subgraph_config, database_string):
+@click.option(
+    "--output-location",
+    default="data",
+    help="The base output location, whether local or cloud",
+)
+def main(subgraph_config, database_string, output_location):
     """Connects to your database and pulls all data from all subgraphs"""
 
     config = yaml.safe_load(subgraph_config)
     subgraph = get_subgraph_schema(config["id"], database_string)
     table_schema = subgraph["table_schema"]
     subgraph_id = subgraph["subgraph_id"]
+    root_output_location = AnyPath(output_location)
     for table_name, table_config in tqdm(
         config["tables"].items(), leave=False, desc="Tables"
     ):
+        table_dir = root_output_location.joinpath(
+            "data", f"subgraph={subgraph_id}", f"table={table_name}"
+        )
         partition_column = table_config["partition_column"]
         partition_range = get_partitions(
             database_string,
@@ -165,17 +200,14 @@ def main(subgraph_config, database_string):
             table_schema,
             table_name,
         )
-        for partition_size, start_partition, end_partition in tqdm(partition_range, leave=False, desc="Paritions"):
-            basedir = os.path.join(
-                "data",
-                f"subgraph={subgraph_id}",
-                f"table={table_name}",
-                f"partition_size={partition_size}",
-                f"start_partition={start_partition}",
-                f"end_partition={end_partition}",
+        unexported_partitions = filter_existing_partitions(table_dir, partition_range)
+        for partition_size, start_partition, end_partition in tqdm(
+            unexported_partitions, leave=False, desc="Paritions"
+        ):
+            filepath = get_partition_file_location(
+                table_dir, partition_size, start_partition, end_partition
             )
-            filepath = os.path.join(basedir, "data.parquet")
-            if not os.path.isfile(filepath):
+            if not filepath.exists():
                 df = pandas.read_sql(
                     sql=get_select_all_exclusive(
                         database_string,
@@ -194,8 +226,9 @@ def main(subgraph_config, database_string):
                     database_string, table_schema, table_name
                 )
                 typed_df = convert_columns(df, database_types, table_config)
-                os.makedirs(basedir, exist_ok=True)
-                typed_df.to_parquet(filepath)
+                filepath.parent.mkdir(parents=True, exist_ok=True)
+                with filepath.open("wb") as f_out:
+                    typed_df.to_parquet(f_out)
 
 
 def get_tables_in_schema(database_string, table_schema, ignored_tables=[]):
