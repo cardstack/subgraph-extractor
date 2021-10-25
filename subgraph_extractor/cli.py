@@ -9,6 +9,7 @@ import numpy as np
 
 from simple_term_menu import TerminalMenu
 from tqdm import tqdm
+from deepdiff import DeepDiff
 
 from cloudpathlib import AnyPath
 
@@ -182,10 +183,24 @@ def main(subgraph_config, database_string, output_location):
     """Connects to your database and pulls all data from all subgraphs"""
 
     config = yaml.safe_load(subgraph_config)
-    subgraph = get_subgraph_schema(config["id"], database_string)
+    subgraph = get_subgraph_schema(config["subgraph_id"], database_string)
     table_schema = subgraph["table_schema"]
     subgraph_id = subgraph["subgraph_id"]
-    root_output_location = AnyPath(output_location)
+    root_output_location = AnyPath(output_location).joinpath(
+        config["name"], config["version"]
+    )
+    config_output_location = root_output_location.joinpath("config.yaml")
+    if config_output_location.exists():
+        existing_config = yaml.safe_load(config_output_location.open("r"))
+        config_difference = DeepDiff(existing_config, config)
+        if config_difference:
+            raise Exception(
+                f"Config provided does not match the previously seen version at {config_output_location}"
+            )
+    else:
+        config_output_location.parent.mkdir(parents=True, exist_ok=True)
+        with config_output_location.open("w") as f_out:
+            yaml.dump(config, f_out)
     for table_name, table_config in tqdm(
         config["tables"].items(), leave=False, desc="Tables"
     ):
@@ -277,7 +292,7 @@ def config_generator(config_location, database_string):
     # Let pandas figure out the width of the terminal
     pandas.set_option("display.width", None)
 
-    config = {}
+    config = {"name": "test_config", "version": "0.0.1"}
 
     subgraph_schemas = get_subgraph_schemas(database_string)
 
@@ -302,7 +317,7 @@ Tables ({len(table_list)}): {table_list_formatted}
     menu_entry_index = terminal_menu.show()
     schema_data = subgraph_schemas[options[menu_entry_index]]
     table_schema = schema_data["table_schema"]
-    config["id"] = schema_data["subgraph_id"]
+    config["subgraph_id"] = schema_data["subgraph_id"]
 
     tables = get_tables_in_schema(database_string, table_schema)
 

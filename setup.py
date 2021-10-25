@@ -17,6 +17,7 @@ setup(
         "simple-term-menu",
         "tqdm",
         "cloudpathlib[all]",
+        "deepdiff"
     ],
     extras_require={"dev": ["pytest", "black", "isort", "pytest-pep8", "pytest-cov"]},
     entry_points={
