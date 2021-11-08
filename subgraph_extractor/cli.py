@@ -22,35 +22,29 @@ def get_select_all_exclusive(
     subgraph_schema,
     table_name,
     partition_column,
-    start_partition=None,
-    end_partition=None,
-    ignored_columns=[],
+    start_partition,
+    end_partition,
 ):
-    """Returns a select all statement excluding certain columns"""
-    if len(ignored_columns) > 0:
-        wrapped_columns = [f"'{column_name}'" for column_name in ignored_columns]
-        ignored_column_string = f"AND column_name NOT IN ({', '.join(wrapped_columns)})"
-    else:
-        ignored_column_string = ""
 
-    where_clauses = []
-    if start_partition:
-        where_clauses.append(f"{partition_column} >= {start_partition}")
-    if end_partition:
-        where_clauses.append(f"{partition_column} < {end_partition}")
-
-    where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     return pandas.read_sql(
         sql=f"""SELECT 
                 'SELECT ' || STRING_AGG('"' || column_name || '"', ', ') || ' 
                     FROM {subgraph_schema}.{table_name}
-                    {where_clause} 
+                    WHERE
+                        {partition_column} >= %(start_partition)s
+                        AND {partition_column} < %(end_partition)s
                     ORDER BY {partition_column}'
             FROM information_schema.columns
-            WHERE table_name = '{table_name}'
-            AND table_schema = '{subgraph_schema}'
-            {ignored_column_string}
+            WHERE table_name = %(table_name)s
+            AND table_schema = %(subgraph_schema)s
+            AND column_name NOT IN ('vid', 'block_range')
             """,
+        params={
+            "start_partition": start_partition,
+            "end_partition": end_partition,
+            "table_name": table_name,
+            "subgraph_schema": subgraph_schema,
+        },
         con=database_string,
     ).iloc[0][0]
 
@@ -59,23 +53,43 @@ def get_column_types(database_string, subgraph_schema, table_name):
     df = pandas.read_sql(
         sql=f"""SELECT column_name, data_type
                 FROM information_schema.columns
-                WHERE table_name = '{table_name}'
-                AND table_schema = '{subgraph_schema}'
+            WHERE table_name = %(table_name)s
+            AND table_schema = %(subgraph_schema)s
             """,
+        params={"table_name": table_name, "subgraph_schema": subgraph_schema},
         con=database_string,
     )
     return {row["column_name"]: row["data_type"] for row in df.to_dict("records")}
 
 
-def get_subgraph_schema(subgraph_id, database_string):
-    return pandas.read_sql(
+def get_subgraph_schemas(database_string):
+    schema_data = pandas.read_sql(
         """
-    SELECT name from deployment_schemas
-    where subgraph = %(subgraph_id)s
+    SELECT
+  ds.subgraph AS subgraph_id,
+  ds.name AS subgraph_schema,
+  sv.id,
+  s.name as label
+FROM
+  deployment_schemas ds
+  LEFT JOIN subgraphs.subgraph_version sv ON (ds.subgraph = sv.deployment)
+  LEFT JOIN subgraphs.subgraph s ON (s.current_version = sv.id)
+WHERE
+  ds.active
     """,
-        params={"subgraph_id": subgraph_id},
         con=database_string,
-    ).iloc[0][0]
+    ).to_dict("records")
+    return {subgraph["label"]: subgraph for subgraph in schema_data}
+
+
+def get_subgraph_schema(subgraph, database_string):
+    schemas = get_subgraph_schemas(database_string)
+    return schemas[subgraph]["subgraph_schema"]
+
+
+def get_subgraph_id(subgraph, database_string):
+    schemas = get_subgraph_schemas(database_string)
+    return schemas[subgraph]["id"]
 
 
 def convert_columns(df, database_types, table_config):
@@ -106,21 +120,21 @@ def convert_columns(df, database_types, table_config):
         database_type = database_types[column_name]
         if database_type in TYPE_MAPPINGS:
             update_types[column_name] = TYPE_MAPPINGS[database_type]
-        if database_type == 'numeric':
-            df[column_name] = df[column_name].map(lambda x : int(x).to_bytes(32, byteorder='big'))
+        if database_type == "numeric":
+            df[column_name] = df[column_name].map(
+                lambda x: int(x).to_bytes(32, byteorder="big")
+            )
     df = df.rename_axis(None)
     df = df.assign(**new_columns)
     table = pyarrow.Table.from_pandas(df, preserve_index=False)
     schema = table.schema
     types = {
-        'uint64': pyarrow.uint64(), 
-        'bytes': pyarrow.binary(), 
-        'bool': pyarrow.bool_(),
-        'boolean': pyarrow.bool_(),
-        'string': pyarrow.string(),
-        'Numeric38': pyarrow.decimal128(
-                    precision=38
-                )
+        "uint64": pyarrow.uint64(),
+        "bytes": pyarrow.binary(),
+        "bool": pyarrow.bool_(),
+        "boolean": pyarrow.bool_(),
+        "string": pyarrow.string(),
+        "Numeric38": pyarrow.decimal128(precision=38),
     }
     for column_name, new_type in update_types.items():
         field_index = schema.get_field_index(column_name)
@@ -202,8 +216,9 @@ def main(subgraph_config, database_string, output_location):
     """Connects to your database and pulls all data from all subgraphs"""
 
     config = yaml.safe_load(AnyPath(subgraph_config).open("r"))
-    subgraph_id = config["subgraph_id"]
-    subgraph_schema = get_subgraph_schema(subgraph_id, database_string)
+    subgraph = config["subgraph"]
+    subgraph_id = get_subgraph_id(subgraph, database_string)
+    subgraph_schema = get_subgraph_schema(subgraph, database_string)
     root_output_location = AnyPath(output_location).joinpath(
         config["name"], config["version"]
     )
@@ -233,9 +248,7 @@ def main(subgraph_config, database_string, output_location):
             subgraph_schema,
             table_name,
         )
-        database_types = get_column_types(
-            database_string, subgraph_schema, table_name
-        )
+        database_types = get_column_types(database_string, subgraph_schema, table_name)
         unexported_partitions = filter_existing_partitions(table_dir, partition_range)
         for partition_size, start_partition, end_partition in tqdm(
             unexported_partitions, leave=False, desc="Paritions"
@@ -252,7 +265,6 @@ def main(subgraph_config, database_string, output_location):
                         partition_column,
                         start_partition=start_partition,
                         end_partition=end_partition,
-                        ignored_columns=["vid", "block_range"],
                     ),
                     con=database_string,
                     coerce_float=False,
@@ -271,26 +283,6 @@ def get_tables_in_schema(database_string, subgraph_schema, ignored_tables=[]):
         con=database_string,
     )["table_name"].tolist()
     return sorted(list(set(all_tables) - set(ignored_tables)))
-
-
-def get_subgraph_schemas(database_string):
-    schema_data = pandas.read_sql(
-        """
-    SELECT
-  ds.subgraph AS subgraph_id,
-  ds.name AS subgraph_schema,
-  sv.id,
-  s.name as label
-FROM
-  deployment_schemas ds
-  LEFT JOIN subgraphs.subgraph_version sv ON (ds.subgraph = sv.deployment)
-  LEFT JOIN subgraphs.subgraph s ON (s.current_version = sv.id)
-WHERE
-  ds.active
-    """,
-        con=database_string,
-    ).to_dict("records")
-    return {subgraph["label"]: subgraph for subgraph in schema_data}
 
 
 @click.command()
@@ -333,7 +325,7 @@ Tables ({len(table_list)}): {table_list_formatted}
     menu_entry_index = terminal_menu.show()
     schema_data = subgraph_schemas[options[menu_entry_index]]
     subgraph_schema = schema_data["subgraph_schema"]
-    config["subgraph_id"] = schema_data["subgraph_id"]
+    config["subgraph"] = schema_data["label"]
 
     tables = get_tables_in_schema(database_string, subgraph_schema)
 
