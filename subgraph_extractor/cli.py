@@ -130,7 +130,6 @@ def convert_columns(df, database_types, table_config):
 
     table = table.cast(schema, safe=False)
     return table
-    return df.astype(update_types)
 
 
 def get_partition_iterator(min_partition, max_partition, partition_sizes):
