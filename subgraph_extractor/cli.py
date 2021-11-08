@@ -3,6 +3,7 @@ import os
 import click
 import pandas
 import pyarrow
+import pyarrow.parquet as pq
 import yaml
 
 import numpy as np
@@ -13,12 +14,12 @@ from deepdiff import DeepDiff
 
 from cloudpathlib import AnyPath
 
-TYPE_MAPPINGS = {"numeric": "bytes", "text": "string"}
+TYPE_MAPPINGS = {"numeric": "bytes", "text": "string", "boolean": "bool"}
 
 
 def get_select_all_exclusive(
     database_string,
-    table_schema,
+    subgraph_schema,
     table_name,
     partition_column,
     start_partition=None,
@@ -42,24 +43,24 @@ def get_select_all_exclusive(
     return pandas.read_sql(
         sql=f"""SELECT 
                 'SELECT ' || STRING_AGG('"' || column_name || '"', ', ') || ' 
-                    FROM {table_schema}.{table_name}
+                    FROM {subgraph_schema}.{table_name}
                     {where_clause} 
                     ORDER BY {partition_column}'
             FROM information_schema.columns
             WHERE table_name = '{table_name}'
-            AND table_schema = '{table_schema}'
+            AND table_schema = '{subgraph_schema}'
             {ignored_column_string}
             """,
         con=database_string,
     ).iloc[0][0]
 
 
-def get_column_types(database_string, table_schema, table_name):
+def get_column_types(database_string, subgraph_schema, table_name):
     df = pandas.read_sql(
         sql=f"""SELECT column_name, data_type
                 FROM information_schema.columns
                 WHERE table_name = '{table_name}'
-                AND table_schema = '{table_schema}'
+                AND table_schema = '{subgraph_schema}'
             """,
         con=database_string,
     )
@@ -69,20 +70,16 @@ def get_column_types(database_string, table_schema, table_name):
 def get_subgraph_schema(subgraph_id, database_string):
     return pandas.read_sql(
         """
-    SELECT subgraph as subgraph_id, name as table_schema from deployment_schemas
+    SELECT name from deployment_schemas
     where subgraph = %(subgraph_id)s
     """,
         params={"subgraph_id": subgraph_id},
         con=database_string,
-    ).to_dict("records")[0]
+    ).iloc[0][0]
 
 
 def convert_columns(df, database_types, table_config):
     update_types = {}
-    for column_name in df.columns:
-        database_type = database_types[column_name]
-        if database_type in TYPE_MAPPINGS:
-            update_types[column_name] = TYPE_MAPPINGS[database_type]
     new_columns = {}
     for column, mappings in table_config["column_mappings"].items():
         for new_column_name, new_column_config in mappings.items():
@@ -104,14 +101,35 @@ def convert_columns(df, database_types, table_config):
                 update_types[validity_column] = "boolean"
             else:
                 new_columns[new_column_name] = new_column
-            if new_column_config["type"] == "Numeric38":
-                update_types[new_column_name] = pyarrow.decimal128(
-                    precision=38
-                ).to_pandas_dtype()
-            else:
-                update_types[new_column_name] = new_column_config["type"]
-
+            update_types[new_column_name] = new_column_config["type"]
+    for column_name in df.columns:
+        database_type = database_types[column_name]
+        if database_type in TYPE_MAPPINGS:
+            update_types[column_name] = TYPE_MAPPINGS[database_type]
+        if database_type == 'numeric':
+            df[column_name] = df[column_name].map(lambda x : int(x).to_bytes(32, byteorder='big'))
+    df = df.rename_axis(None)
     df = df.assign(**new_columns)
+    table = pyarrow.Table.from_pandas(df, preserve_index=False)
+    schema = table.schema
+    types = {
+        'uint64': pyarrow.uint64(), 
+        'bytes': pyarrow.binary(), 
+        'bool': pyarrow.bool_(),
+        'boolean': pyarrow.bool_(),
+        'string': pyarrow.string(),
+        'Numeric38': pyarrow.decimal128(
+                    precision=38
+                )
+    }
+    for column_name, new_type in update_types.items():
+        field_index = schema.get_field_index(column_name)
+        field = schema.field(field_index)
+        new_field = field.with_type(types[new_type])
+        schema = schema.set(field_index, new_field)
+
+    table = table.cast(schema, safe=False)
+    return table
     return df.astype(update_types)
 
 
@@ -119,18 +137,21 @@ def get_partition_iterator(min_partition, max_partition, partition_sizes):
     for partition_size in sorted(partition_sizes, reverse=True):
         start_partition_allowed = (min_partition // partition_size) * partition_size
         end_partition_allowed = (max_partition // partition_size) * partition_size
+        last_max_partition = None
         for start_partition in range(
             start_partition_allowed, end_partition_allowed, partition_size
         ):
+            last_max_partition = start_partition + partition_size
             yield partition_size, start_partition, start_partition + partition_size
-        min_partition = start_partition + partition_size
+        if last_max_partition is not None:
+            min_partition = last_max_partition
 
 
 def get_partitions(
-    database_string, partition_column, partition_sizes, table_schema, table_name
+    database_string, partition_column, partition_sizes, subgraph_schema, table_name
 ):
     limits_df = pandas.read_sql(
-        sql=f"select min({partition_column}) as min_partition, max({partition_column}) as max_partition from {table_schema}.{table_name}",
+        sql=f"select min({partition_column}) as min_partition, max({partition_column}) as max_partition from {subgraph_schema}.{table_name}",
         con=database_string,
         coerce_float=False,
     )
@@ -182,9 +203,8 @@ def main(subgraph_config, database_string, output_location):
     """Connects to your database and pulls all data from all subgraphs"""
 
     config = yaml.safe_load(AnyPath(subgraph_config).open("r"))
-    subgraph = get_subgraph_schema(config["subgraph_id"], database_string)
-    table_schema = subgraph["table_schema"]
-    subgraph_id = subgraph["subgraph_id"]
+    subgraph_id = config["subgraph_id"]
+    subgraph_schema = get_subgraph_schema(subgraph_id, database_string)
     root_output_location = AnyPath(output_location).joinpath(
         config["name"], config["version"]
     )
@@ -211,8 +231,11 @@ def main(subgraph_config, database_string, output_location):
             database_string,
             partition_column,
             table_config["partition_sizes"],
-            table_schema,
+            subgraph_schema,
             table_name,
+        )
+        database_types = get_column_types(
+            database_string, subgraph_schema, table_name
         )
         unexported_partitions = filter_existing_partitions(table_dir, partition_range)
         for partition_size, start_partition, end_partition in tqdm(
@@ -225,7 +248,7 @@ def main(subgraph_config, database_string, output_location):
                 df = pandas.read_sql(
                     sql=get_select_all_exclusive(
                         database_string,
-                        table_schema,
+                        subgraph_schema,
                         table_name,
                         partition_column,
                         start_partition=start_partition,
@@ -235,21 +258,16 @@ def main(subgraph_config, database_string, output_location):
                     con=database_string,
                     coerce_float=False,
                 )
-                # Get the column types
-                database_types = get_column_types(
-                    database_string, table_schema, table_name
-                )
                 typed_df = convert_columns(df, database_types, table_config)
                 filepath.parent.mkdir(parents=True, exist_ok=True)
-                with filepath.open("wb") as f_out:
-                    typed_df.to_parquet(f_out)
+                pq.write_table(typed_df, filepath)
 
 
-def get_tables_in_schema(database_string, table_schema, ignored_tables=[]):
+def get_tables_in_schema(database_string, subgraph_schema, ignored_tables=[]):
     all_tables = pandas.read_sql(
         f"""
     SELECT table_name FROM information_schema.tables 
-    WHERE table_schema = '{table_schema}'
+    WHERE subgraph_schema = '{subgraph_schema}'
     """,
         con=database_string,
     )["table_name"].tolist()
@@ -261,7 +279,7 @@ def get_subgraph_schemas(database_string):
         """
     SELECT
   ds.subgraph AS subgraph_id,
-  ds.name AS table_schema,
+  ds.name AS subgraph_schema,
   sv.id,
   s.name as label
 FROM
@@ -298,7 +316,7 @@ def config_generator(config_location, database_string):
     def preview_schema_data(label):
         schema = subgraph_schemas[label]
         table_spacer = "\n - "
-        table_list = get_tables_in_schema(database_string, schema["table_schema"])
+        table_list = get_tables_in_schema(database_string, schema["subgraph_schema"])
         table_list_formatted = table_spacer + table_spacer.join(table_list)
         # Make nicer
         return f"""
@@ -315,14 +333,14 @@ Tables ({len(table_list)}): {table_list_formatted}
     )
     menu_entry_index = terminal_menu.show()
     schema_data = subgraph_schemas[options[menu_entry_index]]
-    table_schema = schema_data["table_schema"]
+    subgraph_schema = schema_data["subgraph_schema"]
     config["subgraph_id"] = schema_data["subgraph_id"]
 
-    tables = get_tables_in_schema(database_string, table_schema)
+    tables = get_tables_in_schema(database_string, subgraph_schema)
 
     def preview_table_data(table):
         subset = pandas.read_sql(
-            f"select * from {table_schema}.{table} limit 10", con=database_string
+            f"select * from {subgraph_schema}.{table} limit 10", con=database_string
         )
         return str(subset.head())
 
@@ -339,7 +357,7 @@ Tables ({len(table_list)}): {table_list_formatted}
     config["tables"] = {}
     for table in selected_tables:
         table_config = {}
-        column_types = get_column_types(database_string, table_schema, table)
+        column_types = get_column_types(database_string, subgraph_schema, table)
         column_names = sorted(list(column_types.keys()))
         terminal_menu = TerminalMenu(
             column_names, title=f"Please select the partition column for table {table}"

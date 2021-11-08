@@ -19,7 +19,7 @@ setup(
         "cloudpathlib[all]",
         "deepdiff"
     ],
-    extras_require={"dev": ["pytest", "black", "isort", "pytest-pep8", "pytest-cov"]},
+    extras_require={"dev": ["pytest", "black", "isort", "pytest-pep8", "pytest-cov", "pytest-postgresql", "hypothesis"]},
     entry_points={
         "console_scripts": [
             "subgraph_extractor=subgraph_extractor.cli:main",
