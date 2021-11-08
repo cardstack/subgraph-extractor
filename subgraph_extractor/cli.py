@@ -75,7 +75,7 @@ FROM
   LEFT JOIN subgraphs.subgraph_version sv ON (ds.subgraph = sv.deployment)
   LEFT JOIN subgraphs.subgraph s ON (s.current_version = sv.id)
 WHERE
-  ds.active
+  ds.active AND s.current_version is not NULL
     """,
         con=database_string,
     ).to_dict("records")
@@ -278,7 +278,7 @@ def get_tables_in_schema(database_string, subgraph_schema, ignored_tables=[]):
     all_tables = pandas.read_sql(
         f"""
     SELECT table_name FROM information_schema.tables 
-    WHERE subgraph_schema = '{subgraph_schema}'
+    WHERE table_schema = '{subgraph_schema}'
     """,
         con=database_string,
     )["table_name"].tolist()
@@ -303,7 +303,6 @@ def config_generator(config_location, database_string):
     config = {"name": "test_config", "version": "0.0.1"}
 
     subgraph_schemas = get_subgraph_schemas(database_string)
-
     def preview_schema_data(label):
         schema = subgraph_schemas[label]
         table_spacer = "\n - "
