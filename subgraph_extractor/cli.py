@@ -67,7 +67,7 @@ def get_subgraph_schemas(database_string):
     schema_data = pandas.read_sql(
         """
     SELECT
-  ds.subgraph AS subgraph_id,
+  ds.subgraph AS subgraph_deployment,
   ds.name AS subgraph_schema,
   sv.id,
   s.name as label
@@ -88,9 +88,9 @@ def get_subgraph_schema(subgraph, database_string):
     return schemas[subgraph]["subgraph_schema"]
 
 
-def get_subgraph_id(subgraph, database_string):
+def get_subgraph_deployment(subgraph, database_string):
     schemas = get_subgraph_schemas(database_string)
-    return schemas[subgraph]["id"]
+    return schemas[subgraph]["subgraph_deployment"]
 
 
 def convert_columns(df, database_types, table_config):
@@ -218,7 +218,7 @@ def main(subgraph_config, database_string, output_location):
 
     config = yaml.safe_load(AnyPath(subgraph_config).open("r"))
     subgraph = config["subgraph"]
-    subgraph_id = get_subgraph_id(subgraph, database_string)
+    subgraph_deployment = get_subgraph_deployment(subgraph, database_string)
     subgraph_schema = get_subgraph_schema(subgraph, database_string)
     root_output_location = AnyPath(output_location).joinpath(
         config["name"], config["version"]
@@ -239,7 +239,7 @@ def main(subgraph_config, database_string, output_location):
         config["tables"].items(), leave=False, desc="Tables"
     ):
         table_dir = root_output_location.joinpath(
-            "data", f"subgraph={subgraph_id}", f"table={table_name}"
+            "data", f"subgraph={subgraph_deployment}", f"table={table_name}"
         )
         partition_column = table_config["partition_column"]
         partition_range = get_partitions(
@@ -274,7 +274,7 @@ def main(subgraph_config, database_string, output_location):
                 filepath.parent.mkdir(parents=True, exist_ok=True)
                 pq.write_table(typed_df, filepath)
     with root_output_location.joinpath("latest.yaml").open("w") as f_out:
-        yaml.dump({"subgraph": subgraph, "subgraph_deployment": subgraph_id, "updated": datetime.now()}, f_out)
+        yaml.dump({"subgraph": subgraph, "subgraph_deployment": subgraph_deployment, "updated": datetime.now()}, f_out)
 
 
 def get_tables_in_schema(database_string, subgraph_schema, ignored_tables=[]):
@@ -313,7 +313,7 @@ def config_generator(config_location, database_string):
         table_list_formatted = table_spacer + table_spacer.join(table_list)
         # Make nicer
         return f"""
-Subgraph: {schema["subgraph_id"]}
+Subgraph: {schema["subgraph_deployment"]}
 Tables ({len(table_list)}): {table_list_formatted}
 """
 
