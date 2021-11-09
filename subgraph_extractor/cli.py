@@ -57,7 +57,10 @@ def get_column_types(database_string, subgraph_table_schema, table_name):
             WHERE table_name = %(table_name)s
             AND table_schema = %(subgraph_table_schema)s
             """,
-        params={"table_name": table_name, "subgraph_table_schema": subgraph_table_schema},
+        params={
+            "table_name": table_name,
+            "subgraph_table_schema": subgraph_table_schema,
+        },
         con=database_string,
     )
     return {row["column_name"]: row["data_type"] for row in df.to_dict("records")}
@@ -162,7 +165,11 @@ def get_partition_iterator(min_partition, max_partition, partition_sizes):
 
 
 def get_partitions(
-    database_string, partition_column, partition_sizes, subgraph_table_schema, table_name
+    database_string,
+    partition_column,
+    partition_sizes,
+    subgraph_table_schema,
+    table_name,
 ):
     limits_df = pandas.read_sql(
         sql=f"select min({partition_column}) as min_partition, max({partition_column}) as max_partition from {subgraph_table_schema}.{table_name}",
@@ -249,7 +256,9 @@ def main(subgraph_config, database_string, output_location):
             subgraph_table_schema,
             table_name,
         )
-        database_types = get_column_types(database_string, subgraph_table_schema, table_name)
+        database_types = get_column_types(
+            database_string, subgraph_table_schema, table_name
+        )
         unexported_partitions = filter_existing_partitions(table_dir, partition_range)
         for partition_size, start_partition, end_partition in tqdm(
             unexported_partitions, leave=False, desc="Paritions"
@@ -274,7 +283,14 @@ def main(subgraph_config, database_string, output_location):
                 filepath.parent.mkdir(parents=True, exist_ok=True)
                 pq.write_table(typed_df, filepath)
     with root_output_location.joinpath("latest.yaml").open("w") as f_out:
-        yaml.dump({"subgraph": subgraph, "subgraph_deployment": subgraph_deployment, "updated": datetime.now()}, f_out)
+        yaml.dump(
+            {
+                "subgraph": subgraph,
+                "subgraph_deployment": subgraph_deployment,
+                "updated": datetime.now(),
+            },
+            f_out,
+        )
 
 
 def get_tables_in_schema(database_string, subgraph_table_schema, ignored_tables=[]):
@@ -306,10 +322,13 @@ def config_generator(config_location, database_string):
     config = {"name": "test_config", "version": "0.0.1"}
 
     subgraph_table_schemas = get_subgraph_table_schemas(database_string)
+
     def preview_schema_data(label):
         schema = subgraph_table_schemas[label]
         table_spacer = "\n - "
-        table_list = get_tables_in_schema(database_string, schema["subgraph_table_schema"])
+        table_list = get_tables_in_schema(
+            database_string, schema["subgraph_table_schema"]
+        )
         table_list_formatted = table_spacer + table_spacer.join(table_list)
         # Make nicer
         return f"""
@@ -333,7 +352,8 @@ Tables ({len(table_list)}): {table_list_formatted}
 
     def preview_table_data(table):
         subset = pandas.read_sql(
-            f"select * from {subgraph_table_schema}.{table} limit 10", con=database_string
+            f"select * from {subgraph_table_schema}.{table} limit 10",
+            con=database_string,
         )
         return str(subset.head())
 
