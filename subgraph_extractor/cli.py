@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 
 import click
@@ -272,6 +273,8 @@ def main(subgraph_config, database_string, output_location):
                 typed_df = convert_columns(df, database_types, table_config)
                 filepath.parent.mkdir(parents=True, exist_ok=True)
                 pq.write_table(typed_df, filepath)
+    with root_output_location.joinpath("latest.yaml").open("w") as f_out:
+        yaml.dump({"subgraph": subgraph, "subgraph_deployment": subgraph_id, "updated": datetime.now()}, f_out)
 
 
 def get_tables_in_schema(database_string, subgraph_schema, ignored_tables=[]):
