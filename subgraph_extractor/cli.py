@@ -193,7 +193,7 @@ def filter_existing_partitions(table_dir, partitions):
     # Iterate in reverse until one exists, assume all previous exist
     # We must iterate forwards for processing so return in the correct order.
     new_partitions = []
-    for partition in sorted(partitions, reverse=True):
+    for partition in sorted(partitions, reverse=True, key=lambda x: x[1]):
         if get_partition_file_location(table_dir, *partition).exists():
             return sorted(new_partitions, reverse=True)
         else:
