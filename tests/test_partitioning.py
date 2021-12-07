@@ -1,6 +1,7 @@
-from subgraph_extractor.cli import get_partition_iterator
 from hypothesis import given
 from hypothesis.strategies import integers, lists, sampled_from
+
+from subgraph_extractor.cli import get_partition_iterator
 
 
 def convert_to_partition_sizes(partition_size_scales):

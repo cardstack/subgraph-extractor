@@ -1,19 +1,16 @@
-from datetime import datetime
 import os
+from datetime import datetime
 
 import click
+import numpy as np
 import pandas
 import pyarrow
 import pyarrow.parquet as pq
 import yaml
-
-import numpy as np
-
+from cloudpathlib import AnyPath
+from deepdiff import DeepDiff
 from simple_term_menu import TerminalMenu
 from tqdm import tqdm
-from deepdiff import DeepDiff
-
-from cloudpathlib import AnyPath
 
 TYPE_MAPPINGS = {"numeric": "bytes", "text": "string", "boolean": "bool"}
 

@@ -1,7 +1,8 @@
-import pytest
-from subgraph_extractor.cli import *
-from pytest_postgresql import factories
 import pandas
+import pytest
+from pytest_postgresql import factories
+
+from subgraph_extractor.cli import *
 
 postgresql_my_proc = factories.postgresql_proc(load=["tests/resources/example_db.sql"])
 sample_subgraph = factories.postgresql("postgresql_my_proc")
