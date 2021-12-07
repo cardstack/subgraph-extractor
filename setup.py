@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="subgraph_extractor",
-    version="0.0.1",
+    version="0.0.2",
     description="Pull data from graph-node databases into parquet files",
     url="http://github.com/cardstack/subgraph-extractor",
     author="Ian Calvert",
@@ -17,9 +17,19 @@ setup(
         "simple-term-menu",
         "tqdm",
         "cloudpathlib[all]",
-        "deepdiff"
+        "deepdiff",
     ],
-    extras_require={"dev": ["pytest", "black", "isort", "pytest-pep8", "pytest-cov", "pytest-postgresql", "hypothesis"]},
+    extras_require={
+        "dev": [
+            "pytest",
+            "black",
+            "isort",
+            "pytest-pep8",
+            "pytest-cov",
+            "pytest-postgresql",
+            "hypothesis",
+        ]
+    },
     entry_points={
         "console_scripts": [
             "subgraph_extractor=subgraph_extractor.cli:main",
