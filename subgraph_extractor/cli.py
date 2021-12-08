@@ -201,23 +201,7 @@ def filter_existing_partitions(table_dir, partitions):
     return new_partitions
 
 
-@click.command()
-@click.option(
-    "--subgraph-config",
-    help="The config file specifying the data to extract",
-    required=True,
-)
-@click.option(
-    "--database-string",
-    default="postgresql://graph-node:let-me-in@localhost:5432/graph-node",
-    help="The database string for connections, defaults to a local graph-node",
-)
-@click.option(
-    "--output-location",
-    default="data",
-    help="The base output location, whether local or cloud",
-)
-def main(subgraph_config, database_string, output_location):
+def extract_from_config(subgraph_config, database_string, output_location):
     """Connects to your database and pulls all data from all subgraphs"""
 
     config = yaml.safe_load(AnyPath(subgraph_config).open("r"))
@@ -289,6 +273,26 @@ def main(subgraph_config, database_string, output_location):
             f_out,
         )
 
+
+@click.command()
+@click.option(
+    "--subgraph-config",
+    help="The config file specifying the data to extract",
+    required=True,
+)
+@click.option(
+    "--database-string",
+    default="postgresql://graph-node:let-me-in@localhost:5432/graph-node",
+    help="The database string for connections, defaults to a local graph-node",
+)
+@click.option(
+    "--output-location",
+    default="data",
+    help="The base output location, whether local or cloud",
+)
+def main(subgraph_config, database_string, output_location):
+    """Connects to your database and pulls all data from all subgraphs"""
+    extract_from_config(subgraph_config, database_string, output_location)
 
 def get_tables_in_schema(database_string, subgraph_table_schema, ignored_tables=[]):
     all_tables = pandas.read_sql(
