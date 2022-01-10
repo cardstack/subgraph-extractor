@@ -261,7 +261,12 @@ def extract_from_config(subgraph_config, database_string, output_location):
                     coerce_float=False,
                 )
                 typed_df = convert_columns(df, database_types, table_config)
-                filepath.parent.mkdir(parents=True, exist_ok=True)
+                # Pyarrow doesn't create the parent directories for us, so we do it here
+                # If it's a remote location, we need to create the local temp dir
+                if hasattr(filepath, "_local"):
+                    filepath._local.parent.mkdir(parents=True, exist_ok=True)
+                else:
+                    filepath.parent.mkdir(parents=True, exist_ok=True)
                 pq.write_table(typed_df, filepath)
     with root_output_location.joinpath("latest.yaml").open("w") as f_out:
         yaml.dump(
@@ -293,6 +298,7 @@ def extract_from_config(subgraph_config, database_string, output_location):
 def main(subgraph_config, database_string, output_location):
     """Connects to your database and pulls all data from all subgraphs"""
     extract_from_config(subgraph_config, database_string, output_location)
+
 
 def get_tables_in_schema(database_string, subgraph_table_schema, ignored_tables=[]):
     all_tables = pandas.read_sql(
