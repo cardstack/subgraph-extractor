@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="subgraph_extractor",
-    version="0.0.5",
+    version="0.0.6",
     description="Pull data from graph-node databases into parquet files",
     url="http://github.com/cardstack/subgraph-extractor",
     author="Ian Calvert",

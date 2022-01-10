@@ -7,10 +7,11 @@ import pandas
 import pyarrow
 import pyarrow.parquet as pq
 import yaml
-from cloudpathlib import AnyPath
+from cloudpathlib import AnyPath, CloudPath
 from deepdiff import DeepDiff
 from simple_term_menu import TerminalMenu
 from tqdm import tqdm
+import tempfile
 
 TYPE_MAPPINGS = {"numeric": "bytes", "text": "string", "boolean": "bool"}
 
@@ -261,13 +262,16 @@ def extract_from_config(subgraph_config, database_string, output_location):
                     coerce_float=False,
                 )
                 typed_df = convert_columns(df, database_types, table_config)
-                # Pyarrow doesn't create the parent directories for us, so we do it here
-                # If it's a remote location, we need to create the local temp dir
-                if hasattr(filepath, "_local"):
-                    filepath._local.parent.mkdir(parents=True, exist_ok=True)
+                # Pyarrow can't take a file object so we have to write to a temp file
+                # and upload directly
+                filepath.parent.mkdir(parents=True, exist_ok=True)
+                if isinstance(filepath, CloudPath):
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        pq_file_location = AnyPath(temp_dir).joinpath("data.parquet")
+                        pq.write_table(typed_df, pq_file_location)
+                        filepath.upload_from(pq_file_location)
                 else:
-                    filepath.parent.mkdir(parents=True, exist_ok=True)
-                pq.write_table(typed_df, filepath)
+                    pq.write_table(typed_df, filepath)
     with root_output_location.joinpath("latest.yaml").open("w") as f_out:
         yaml.dump(
             {
