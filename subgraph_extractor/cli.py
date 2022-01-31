@@ -203,9 +203,13 @@ def filter_existing_partitions(table_dir, partitions):
 
 
 def extract_from_config(subgraph_config, database_string, output_location):
+    config = yaml.safe_load(AnyPath(subgraph_config).open("r"))
+    return extract(config, database_string, output_location)
+
+
+def extract(config, database_string, output_location):
     """Connects to your database and pulls all data from all subgraphs"""
 
-    config = yaml.safe_load(AnyPath(subgraph_config).open("r"))
     subgraph = config["subgraph"]
     subgraph_deployment = get_subgraph_deployment(subgraph, database_string)
     subgraph_table_schema = get_subgraph_table_schema(subgraph, database_string)
