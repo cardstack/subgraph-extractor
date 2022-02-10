@@ -31,6 +31,8 @@ def test_get_subgraph_table_schemas(db_conn):
             "label": "my_test_subgraph",
             "subgraph_deployment": "SUBGRAPHIPFS",
             "subgraph_table_schema": "sgd1",
+            "latest_block": 10000000,
+            "earliest_block": 1,
         }
     }
 
