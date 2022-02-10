@@ -1,4 +1,3 @@
-import os
 from datetime import datetime
 
 import click
@@ -15,24 +14,25 @@ import tempfile
 
 TYPE_MAPPINGS = {"numeric": "bytes", "text": "string", "boolean": "bool"}
 
+BLOCK_COLUMN = "_block_number"
+
 
 def get_select_all_exclusive(
     database_string,
     subgraph_table_schema,
     table_name,
-    partition_column,
     start_partition,
     end_partition,
 ):
 
     return pandas.read_sql(
         sql=f"""SELECT 
-                'SELECT ' || STRING_AGG('"' || column_name || '"', ', ') || ' 
+                'SELECT ' || STRING_AGG('"' || column_name || '"', ', ') || ', lower(block_range) as {BLOCK_COLUMN} 
                     FROM {subgraph_table_schema}.{table_name}
                     WHERE
-                        {partition_column} >= %(start_partition)s
-                        AND {partition_column} < %(end_partition)s
-                    ORDER BY {partition_column}'
+                        lower(block_range) >= %(start_partition)s
+                        AND lower(block_range) < %(end_partition)s
+                    ORDER BY lower(block_range) asc'
             FROM information_schema.columns
             WHERE table_name = %(table_name)s
             AND table_schema = %(subgraph_table_schema)s
@@ -71,11 +71,14 @@ def get_subgraph_table_schemas(database_string):
   ds.subgraph AS subgraph_deployment,
   ds.name AS subgraph_table_schema,
   sv.id,
-  s.name as label
+  s.name as label,
+  sd.earliest_ethereum_block_number::int as earliest_block,
+  sd.latest_ethereum_block_number::int as latest_block
 FROM
   deployment_schemas ds
   LEFT JOIN subgraphs.subgraph_version sv ON (ds.subgraph = sv.deployment)
   LEFT JOIN subgraphs.subgraph s ON (s.current_version = sv.id)
+  LEFT JOIN subgraphs.subgraph_deployment sd ON (sd.deployment = ds.subgraph)
 WHERE
   ds.active AND s.current_version is not NULL
     """,
@@ -94,10 +97,15 @@ def get_subgraph_deployment(subgraph, database_string):
     return schemas[subgraph]["subgraph_deployment"]
 
 
+def get_subgraph_block_range(subgraph, database_string):
+    schemas = get_subgraph_table_schemas(database_string)
+    return schemas[subgraph]["earliest_block"], schemas[subgraph]["latest_block"]
+
+
 def convert_columns(df, database_types, table_config):
     update_types = {}
     new_columns = {}
-    for column, mappings in table_config["column_mappings"].items():
+    for column, mappings in table_config.get("column_mappings", {}).items():
         for new_column_name, new_column_config in mappings.items():
             scale_factor = new_column_config.get("downscale")
             if scale_factor:
@@ -119,13 +127,14 @@ def convert_columns(df, database_types, table_config):
                 new_columns[new_column_name] = new_column
             update_types[new_column_name] = new_column_config["type"]
     for column_name in df.columns:
-        database_type = database_types[column_name]
-        if database_type in TYPE_MAPPINGS:
-            update_types[column_name] = TYPE_MAPPINGS[database_type]
-        if database_type == "numeric":
-            df[column_name] = df[column_name].map(
-                lambda x: int(x).to_bytes(32, byteorder="big")
-            )
+        if column_name != BLOCK_COLUMN:
+            database_type = database_types[column_name]
+            if database_type in TYPE_MAPPINGS:
+                update_types[column_name] = TYPE_MAPPINGS[database_type]
+            if database_type == "numeric":
+                df[column_name] = df[column_name].map(
+                    lambda x: int(x).to_bytes(32, byteorder="big")
+                )
     df = df.rename_axis(None)
     df = df.assign(**new_columns)
     table = pyarrow.Table.from_pandas(df, preserve_index=False)
@@ -162,23 +171,6 @@ def get_partition_iterator(min_partition, max_partition, partition_sizes):
             min_partition = last_max_partition
 
 
-def get_partitions(
-    database_string,
-    partition_column,
-    partition_sizes,
-    subgraph_table_schema,
-    table_name,
-):
-    limits_df = pandas.read_sql(
-        sql=f"select min({partition_column}) as min_partition, max({partition_column}) as max_partition from {subgraph_table_schema}.{table_name}",
-        con=database_string,
-        coerce_float=False,
-    )
-    min_partition = int(limits_df["min_partition"].iloc[0])
-    max_partition = int(limits_df["max_partition"].iloc[0])
-    yield from get_partition_iterator(min_partition, max_partition, partition_sizes)
-
-
 def get_partition_file_location(
     table_dir, partition_size, start_partition, end_partition
 ):
@@ -207,15 +199,7 @@ def extract_from_config(subgraph_config, database_string, output_location):
     return extract(config, database_string, output_location)
 
 
-def extract(config, database_string, output_location):
-    """Connects to your database and pulls all data from all subgraphs"""
-
-    subgraph = config["subgraph"]
-    subgraph_deployment = get_subgraph_deployment(subgraph, database_string)
-    subgraph_table_schema = get_subgraph_table_schema(subgraph, database_string)
-    root_output_location = AnyPath(output_location).joinpath(
-        config["name"], config["version"]
-    )
+def write_config(config, root_output_location):
     config_output_location = root_output_location.joinpath("config.yaml")
     if config_output_location.exists():
         existing_config = yaml.safe_load(config_output_location.open("r"))
@@ -228,19 +212,30 @@ def extract(config, database_string, output_location):
         config_output_location.parent.mkdir(parents=True, exist_ok=True)
         with config_output_location.open("w") as f_out:
             yaml.dump(config, f_out)
+
+
+def extract(config, database_string, output_location):
+    """Connects to your database and pulls all data from all subgraphs"""
+
+    subgraph = config["subgraph"]
+    subgraph_deployment = get_subgraph_deployment(subgraph, database_string)
+    subgraph_table_schema = get_subgraph_table_schema(subgraph, database_string)
+    earliest_block, latest_block = get_subgraph_block_range(subgraph, database_string)
+
+    root_output_location = AnyPath(output_location).joinpath(
+        config["name"], config["version"]
+    )
+
+    write_config(config, root_output_location)
+
     for table_name, table_config in tqdm(
         config["tables"].items(), leave=False, desc="Tables"
     ):
         table_dir = root_output_location.joinpath(
             "data", f"subgraph={subgraph_deployment}", f"table={table_name}"
         )
-        partition_column = table_config["partition_column"]
-        partition_range = get_partitions(
-            database_string,
-            partition_column,
-            table_config["partition_sizes"],
-            subgraph_table_schema,
-            table_name,
+        partition_range = get_partition_iterator(
+            earliest_block, latest_block, table_config["partition_sizes"]
         )
         database_types = get_column_types(
             database_string, subgraph_table_schema, table_name
@@ -252,36 +247,36 @@ def extract(config, database_string, output_location):
             filepath = get_partition_file_location(
                 table_dir, partition_size, start_partition, end_partition
             )
-            if not filepath.exists():
-                df = pandas.read_sql(
-                    sql=get_select_all_exclusive(
-                        database_string,
-                        subgraph_table_schema,
-                        table_name,
-                        partition_column,
-                        start_partition=start_partition,
-                        end_partition=end_partition,
-                    ),
-                    con=database_string,
-                    coerce_float=False,
-                )
-                typed_df = convert_columns(df, database_types, table_config)
-                # Pyarrow can't take a file object so we have to write to a temp file
-                # and upload directly
-                filepath.parent.mkdir(parents=True, exist_ok=True)
-                if isinstance(filepath, CloudPath):
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        pq_file_location = AnyPath(temp_dir).joinpath("data.parquet")
-                        pq.write_table(typed_df, pq_file_location)
-                        filepath.upload_from(pq_file_location)
-                else:
-                    pq.write_table(typed_df, filepath)
+            df = pandas.read_sql(
+                sql=get_select_all_exclusive(
+                    database_string,
+                    subgraph_table_schema,
+                    table_name,
+                    start_partition=start_partition,
+                    end_partition=end_partition,
+                ),
+                con=database_string,
+                coerce_float=False,
+            )
+            typed_df = convert_columns(df, database_types, table_config)
+            # Pyarrow can't take a file object so we have to write to a temp file
+            # and upload directly
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(filepath, CloudPath):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    pq_file_location = AnyPath(temp_dir).joinpath("data.parquet")
+                    pq.write_table(typed_df, pq_file_location)
+                    filepath.upload_from(pq_file_location)
+            else:
+                pq.write_table(typed_df, filepath)
     with root_output_location.joinpath("latest.yaml").open("w") as f_out:
         yaml.dump(
             {
                 "subgraph": subgraph,
                 "subgraph_deployment": subgraph_deployment,
                 "updated": datetime.now(),
+                "earliest_block": earliest_block,
+                "latest_block": latest_block,
             },
             f_out,
         )
@@ -304,19 +299,28 @@ def extract(config, database_string, output_location):
     help="The base output location, whether local or cloud",
 )
 def main(subgraph_config, database_string, output_location):
-    """Connects to your database and pulls all data from all subgraphs"""
+    """
+    Connects to your database and pulls all data from the tables
+    specified in the config file
+    """
     extract_from_config(subgraph_config, database_string, output_location)
 
 
-def get_tables_in_schema(database_string, subgraph_table_schema, ignored_tables=[]):
+def get_tables_in_schema(database_string, subgraph_table_schema):
+    """ "
+    Returns a list of all tables in the schema which have a block_range column.
+    This corresponds to tables which contain entities that we can extract
+    """
     all_tables = pandas.read_sql(
         f"""
-    SELECT table_name FROM information_schema.tables 
+    SELECT distinct table_name FROM information_schema.columns 
     WHERE table_schema = '{subgraph_table_schema}'
+    AND column_name = 'block_range'
+    ORDER BY table_name
     """,
         con=database_string,
     )["table_name"].tolist()
-    return sorted(list(set(all_tables) - set(ignored_tables)))
+    return all_tables
 
 
 @click.command()
@@ -334,7 +338,7 @@ def config_generator(config_location, database_string):
     # Let pandas figure out the width of the terminal
     pandas.set_option("display.width", None)
 
-    config = {"name": "test_config", "version": "0.0.1"}
+    config = {"name": AnyPath(config_location).stem, "version": "0.0.1"}
 
     subgraph_table_schemas = get_subgraph_table_schemas(database_string)
 
@@ -386,14 +390,13 @@ Tables ({len(table_list)}): {table_list_formatted}
     for table in selected_tables:
         table_config = {}
         column_types = get_column_types(database_string, subgraph_table_schema, table)
-        column_names = sorted(list(column_types.keys()))
-        terminal_menu = TerminalMenu(
-            column_names, title=f"Please select the partition column for table {table}"
-        )
-        partition_index = terminal_menu.show()
-        partition_column = column_names[partition_index]
-        table_config["partition_column"] = partition_column
-        table_config["partition_sizes"] = [32768]
+        # These sizes are just a sensible default for gnosis chain
+        # With a block duration of about 5 seconds these correspond to (very roughly):
+        # 1024 blocks = 1 1/2 hours
+        # 1024*16 blocks = 1 day
+        # 1024*128 blocks = 1 week
+        # 1024*512 blocks = 1 month
+        table_config["partition_sizes"] = [1024 * 512, 1024 * 128, 1024 * 16, 1024]
 
         numeric_columns = sorted(
             [
