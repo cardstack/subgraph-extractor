@@ -409,7 +409,7 @@ Tables ({len(table_list)}): {table_list_formatted}
         if len(numeric_columns) > 0:
             terminal_menu = TerminalMenu(
                 numeric_columns,
-                title=f"These columns are numeric and will be exported as bytes unless they are mapped, which should be mapped to another type?",
+                title=f"These columns in table {table} are numeric and will be exported as bytes unless they are mapped, which should be mapped to another type?",
                 multi_select=True,
             )
             mapped_indices = terminal_menu.show()
