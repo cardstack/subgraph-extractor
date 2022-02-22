@@ -15,6 +15,7 @@ import tempfile
 TYPE_MAPPINGS = {"numeric": "bytes", "text": "string", "boolean": "bool"}
 
 BLOCK_COLUMN = "_block_number"
+BLOCK_COLUMN_TYPE = pyarrow.uint32()
 
 
 def get_select_all_exclusive(
@@ -103,7 +104,7 @@ def get_subgraph_block_range(subgraph, database_string):
 
 
 def convert_columns(df, database_types, table_config):
-    update_types = {}
+    update_types = {BLOCK_COLUMN: BLOCK_COLUMN_TYPE}
     new_columns = {}
     for column, mappings in table_config.get("column_mappings", {}).items():
         for new_column_name, new_column_config in mappings.items():
@@ -140,6 +141,7 @@ def convert_columns(df, database_types, table_config):
     table = pyarrow.Table.from_pandas(df, preserve_index=False)
     schema = table.schema
     types = {
+        "uint32": pyarrow.uint32(),
         "uint64": pyarrow.uint64(),
         "bytes": pyarrow.binary(),
         "bool": pyarrow.bool_(),
