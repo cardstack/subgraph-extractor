@@ -50,3 +50,39 @@ def test_get_column_types(db_conn, table_schema_name, valid_table_name):
         "from_address": "text",
         "to_address": "text",
     }
+
+
+def test_blockrange_returns_uint32(db_conn):
+
+    db_columns = get_column_types(db_conn, "sgd1", "prepaid_card_ask_sample")
+    df = pandas.read_sql(
+        sql=get_select_all_exclusive(
+            db_conn,
+            "sgd1",
+            "prepaid_card_ask_sample",
+            start_partition=18460372,
+            end_partition=18888120,
+        ),
+        con=db_conn,
+        coerce_float=False,
+    )
+    typed_df = convert_columns(df, db_columns, {})
+    assert typed_df.schema.field_by_name("_block_number").type == pyarrow.uint32()
+
+
+def test_blockrange_returns_uint32_when_empty(db_conn):
+
+    db_columns = get_column_types(db_conn, "sgd1", "prepaid_card_ask_sample")
+    df = pandas.read_sql(
+        sql=get_select_all_exclusive(
+            db_conn,
+            "sgd1",
+            "prepaid_card_ask_sample",
+            start_partition=19000000,
+            end_partition=19100000,
+        ),
+        con=db_conn,
+        coerce_float=False,
+    )
+    typed_df = convert_columns(df, db_columns, {})
+    assert typed_df.schema.field_by_name("_block_number").type == pyarrow.uint32()
