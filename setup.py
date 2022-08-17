@@ -17,7 +17,7 @@ setup(
         "pyarrow",
         "simple-term-menu",
         "tqdm",
-        "cloudpathlib[all]",
+        "cloudpathlib[s3]>=0.9.0",
         "deepdiff",
     ],
     extras_require={
