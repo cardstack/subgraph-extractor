@@ -119,8 +119,6 @@ def get_dataset(output_folder):
                                                "subgraph=SUBGRAPHIPFS",
                                                "table=prepaid_card_ask_sample",
                                                "_metadata")
-    print(metadata_location)
-    print(metadata_location.exists())
     return ds.parquet_dataset(metadata_location, filesystem=fs.LocalFileSystem())
 
 def test_write_out_results(db_conn_string):
