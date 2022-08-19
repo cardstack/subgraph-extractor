@@ -1,21 +1,27 @@
+from unittest import result
 import pandas
 import pytest
 from pytest_postgresql import factories
+import tempfile
+from cloudpathlib import AnyPath
+import pyarrow.dataset as ds
+from pyarrow import fs
+import shutil
 
 from subgraph_extractor.cli import *
 
 postgresql_my_proc = factories.postgresql_proc(load=["tests/resources/example_db.sql"])
-sample_subgraph = factories.postgresql("postgresql_my_proc")
+db_conn = factories.postgresql("postgresql_my_proc")
 
 
 @pytest.fixture
-def db_conn(sample_subgraph):
-    return f"postgresql://{sample_subgraph.info.user}:@{sample_subgraph.info.host}:{sample_subgraph.info.port}/{sample_subgraph.info.dbname}"
+def db_conn_string(db_conn):
+    return f"postgresql://{db_conn.info.user}:@{db_conn.info.host}:{db_conn.info.port}/{db_conn.info.dbname}"
 
 
 @pytest.fixture
-def table_schema_name(db_conn):
-    return get_subgraph_table_schema("my_test_subgraph", db_conn)
+def table_schema_name(db_conn_string):
+    return get_subgraph_table_schema("my_test_subgraph", db_conn_string)
 
 
 @pytest.fixture
@@ -23,27 +29,27 @@ def valid_table_name():
     return "sample_table"
 
 
-def test_get_subgraph_table_schemas(db_conn):
-    subgraph_schemas = get_subgraph_table_schemas(db_conn)
+def test_get_subgraph_table_schemas(db_conn_string):
+    subgraph_schemas = get_subgraph_table_schemas(db_conn_string)
     assert subgraph_schemas == {
         "my_test_subgraph": {
             "id": "internalversion1",
             "label": "my_test_subgraph",
             "subgraph_deployment": "SUBGRAPHIPFS",
             "subgraph_table_schema": "sgd1",
-            "latest_block": 10000000,
-            "earliest_block": 1,
+            "latest_block": 19000000,
+            "earliest_block": 18000000,
         }
     }
 
 
-def test_get_subgraph_table_schema(db_conn):
-    subgraph_schema = get_subgraph_table_schema("my_test_subgraph", db_conn)
+def test_get_subgraph_table_schema(db_conn_string):
+    subgraph_schema = get_subgraph_table_schema("my_test_subgraph", db_conn_string)
     assert subgraph_schema == "sgd1"
 
 
-def test_get_column_types(db_conn, table_schema_name, valid_table_name):
-    db_columns = get_column_types(db_conn, table_schema_name, valid_table_name)
+def test_get_column_types(db_conn_string, table_schema_name, valid_table_name):
+    db_columns = get_column_types(db_conn_string, table_schema_name, valid_table_name)
     assert db_columns == {
         "block_number": "numeric",
         "amount": "numeric",
@@ -52,37 +58,136 @@ def test_get_column_types(db_conn, table_schema_name, valid_table_name):
     }
 
 
-def test_blockrange_returns_uint32(db_conn):
+def test_blockrange_returns_uint32(db_conn_string):
 
-    db_columns = get_column_types(db_conn, "sgd1", "prepaid_card_ask_sample")
+    db_columns = get_column_types(db_conn_string, "sgd1", "prepaid_card_ask_sample")
     df = pandas.read_sql(
         sql=get_select_all_exclusive(
-            db_conn,
+            db_conn_string,
             "sgd1",
             "prepaid_card_ask_sample",
             start_partition=18460372,
             end_partition=18888120,
         ),
-        con=db_conn,
+        con=db_conn_string,
         coerce_float=False,
     )
     typed_df = convert_columns(df, db_columns, {})
     assert typed_df.schema.field_by_name("_block_number").type == pyarrow.uint32()
 
 
-def test_blockrange_returns_uint32_when_empty(db_conn):
+def test_blockrange_returns_uint32_when_empty(db_conn_string):
 
-    db_columns = get_column_types(db_conn, "sgd1", "prepaid_card_ask_sample")
+    db_columns = get_column_types(db_conn_string, "sgd1", "prepaid_card_ask_sample")
     df = pandas.read_sql(
         sql=get_select_all_exclusive(
-            db_conn,
+            db_conn_string,
             "sgd1",
             "prepaid_card_ask_sample",
             start_partition=19000000,
             end_partition=19100000,
         ),
-        con=db_conn,
+        con=db_conn_string,
         coerce_float=False,
     )
     typed_df = convert_columns(df, db_columns, {})
     assert typed_df.schema.field_by_name("_block_number").type == pyarrow.uint32()
+
+
+def extract_to(output_folder, db_conn_string, db_conn=None, latest_block=None):
+    """Extracts the database contents out, optionally only up to a specific block
+
+    Args:
+        output_folder (AnyPath): The folder to write to
+        db_conn_string (str): the database connection string
+        db_conn (): the database connection, required for overriding the latest block
+        latest_block (int): override the latest block in the database
+    """
+    if latest_block is not None:
+        cur = db_conn.cursor()
+        cur.execute(f"UPDATE subgraphs.subgraph_deployment SET latest_ethereum_block_number={latest_block}")
+        db_conn.commit()
+        cur.close()
+    extract({
+            "name": "my_extract_name",
+            "version": "0.0.1",
+            "subgraph": "my_test_subgraph",
+            "tables": {
+                "prepaid_card_ask_sample": {
+                    "partition_sizes": [524288,32768,1024]
+                }
+            }
+        }, db_conn_string, output_folder)
+    return output_folder.joinpath("my_extract_name", "0.0.1")
+
+def test_write_out_results(db_conn_string):
+    
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir = AnyPath(temp_dir)
+        resulting_folder = extract_to(temp_dir, db_conn_string)
+        dataset = ds.dataset(resulting_folder.joinpath("data"), format="parquet")
+        df = dataset.to_table().to_pandas()
+        assert len(df) == 6
+        assert resulting_folder.joinpath("latest.yaml").exists()
+
+def test_writing_twice_when_block_increases_adds_data(db_conn_string, db_conn):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir = AnyPath(temp_dir)
+        resulting_folder = extract_to(temp_dir, db_conn_string, db_conn, 18888000)
+        dataset = ds.dataset(resulting_folder.joinpath("data"), format="parquet")
+        df = dataset.to_table().to_pandas()
+        assert len(df) == 2
+        assert resulting_folder.joinpath("latest.yaml").exists()
+    
+        # Move on some blocks and run again to check we're reading in the existing config and latest.yaml
+        resulting_folder = extract_to(temp_dir, db_conn_string, db_conn, 19000000)
+        dataset = ds.dataset(resulting_folder.joinpath("data"), format="parquet")
+        df = dataset.to_table().to_pandas()
+        # Partitions overlap so we can just remove the duplicates
+        df = df.drop_duplicates()
+        assert len(df) == 6
+        assert resulting_folder.joinpath("latest.yaml").exists()
+
+
+def test_second_run_fills_all_data_if_crashed_in_first(db_conn_string, db_conn):
+    """
+    This test requires some setup to generate a state seen when the following happens:
+    * There has been at least one successful export
+    * A later run writes out *some* of the files but crashes/stops part way through
+    * The process is started again, and it should act as if the erroring run never happened
+
+    An earlier version of the code looked at what had been written out to decide how many partitions
+    needed to be written. It would encounter the *first* file a previous run had written out and
+    assume that all *subsequent* files existed. This results in missing partitions.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # First we need a successful run
+        temp_dir = AnyPath(temp_dir)
+        resulting_folder = extract_to(temp_dir, db_conn_string, db_conn, 18888000)
+        assert resulting_folder.joinpath("latest.yaml").exists()
+        # We will need to reinstate this file so make a copy
+        shutil.copy(resulting_folder.joinpath("latest.yaml"), resulting_folder.joinpath("latest.yaml-successful"))
+
+    
+        # Move on some blocks and run again,
+        resulting_folder = extract_to(temp_dir, db_conn_string, db_conn, 19000000)
+
+        # Break the state as it would be if not all files had been written
+        missing_partition = resulting_folder.joinpath(
+            "data",
+            "subgraph=SUBGRAPHIPFS",
+            "table=prepaid_card_ask_sample",
+            "partition_size=1024",
+            "start_partition=18977792",
+            "end_partition=18978816"
+        )
+
+        shutil.rmtree(missing_partition)
+        assert missing_partition.joinpath("data.parquet").exists() == False
+        # Restore the first 'latest.yaml'
+        shutil.copy(resulting_folder.joinpath("latest.yaml-successful"), resulting_folder.joinpath("latest.yaml"))
+
+        # This is the run we are actually testing
+        resulting_folder = extract_to(temp_dir, db_conn_string, db_conn, 19000000)
+        # The file should be correctly written
+        assert missing_partition.joinpath("data.parquet").exists()

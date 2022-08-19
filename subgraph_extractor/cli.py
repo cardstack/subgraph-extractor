@@ -159,7 +159,10 @@ def convert_columns(df, database_types, table_config):
     return table
 
 
-def get_partition_iterator(min_partition, max_partition, partition_sizes):
+def get_partitions(min_partition, max_partition, partition_sizes):
+    if min_partition is None or max_partition is None:
+        return []
+    partitions = []
     for partition_size in sorted(partition_sizes, reverse=True):
         start_partition_allowed = (min_partition // partition_size) * partition_size
         end_partition_allowed = (max_partition // partition_size) * partition_size
@@ -168,9 +171,10 @@ def get_partition_iterator(min_partition, max_partition, partition_sizes):
             start_partition_allowed, end_partition_allowed, partition_size
         ):
             last_max_partition = start_partition + partition_size
-            yield partition_size, start_partition, start_partition + partition_size
+            partitions.append((partition_size, start_partition, start_partition + partition_size))
         if last_max_partition is not None:
             min_partition = last_max_partition
+    return partitions
 
 
 def get_partition_file_location(
@@ -182,18 +186,6 @@ def get_partition_file_location(
         f"end_partition={end_partition}",
         "data.parquet",
     )
-
-
-def filter_existing_partitions(table_dir, partitions):
-    # Iterate in reverse until one exists, assume all previous exist
-    # We must iterate forwards for processing so return in the correct order.
-    new_partitions = []
-    for partition in sorted(partitions, reverse=True, key=lambda x: x[1]):
-        if get_partition_file_location(table_dir, *partition).exists():
-            return sorted(new_partitions, reverse=True)
-        else:
-            new_partitions.append(partition)
-    return new_partitions
 
 
 def extract_from_config(subgraph_config, database_string, output_location):
@@ -227,8 +219,15 @@ def extract(config, database_string, output_location):
     root_output_location = AnyPath(output_location).joinpath(
         config["name"], config["version"]
     )
+    latest_file_location = root_output_location.joinpath("latest.yaml")
 
     write_config(config, root_output_location)
+
+    if latest_file_location.exists():
+        with latest_file_location.open("r") as f_in:
+            previous_run_data = yaml.load(f_in)
+    else:
+        previous_run_data = {}
 
     for table_name, table_config in tqdm(
         config["tables"].items(), leave=False, desc="Tables"
@@ -236,15 +235,18 @@ def extract(config, database_string, output_location):
         table_dir = root_output_location.joinpath(
             "data", f"subgraph={subgraph_deployment}", f"table={table_name}"
         )
-        partition_range = get_partition_iterator(
+        existing_partitions = set(get_partitions(
+            previous_run_data.get("earliest_block"), previous_run_data.get("latest_block"), table_config["partition_sizes"]
+        ))
+        new_partitions = set(get_partitions(
             earliest_block, latest_block, table_config["partition_sizes"]
-        )
+        ))
         database_types = get_column_types(
             database_string, subgraph_table_schema, table_name
         )
-        unexported_partitions = filter_existing_partitions(table_dir, partition_range)
+        
         for partition_size, start_partition, end_partition in tqdm(
-            unexported_partitions, leave=False, desc="Paritions"
+            new_partitions - existing_partitions, leave=False, desc="Paritions"
         ):
             filepath = get_partition_file_location(
                 table_dir, partition_size, start_partition, end_partition
