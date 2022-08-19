@@ -13,6 +13,16 @@ from subgraph_extractor.cli import *
 postgresql_my_proc = factories.postgresql_proc(load=["tests/resources/example_db.sql"])
 db_conn = factories.postgresql("postgresql_my_proc")
 
+CONFIG = {
+            "name": "my_extract_name",
+            "version": "0.0.1",
+            "subgraph": "my_test_subgraph",
+            "tables": {
+                "prepaid_card_ask_sample": {
+                    "partition_sizes": [524288,32768,1024]
+                }
+            }
+        }
 
 @pytest.fixture
 def db_conn_string(db_conn):
@@ -101,24 +111,24 @@ def extract_to(output_folder, db_conn_string, db_conn=None, latest_block=None):
         cur.execute(f"UPDATE subgraphs.subgraph_deployment SET latest_ethereum_block_number={latest_block}")
         db_conn.commit()
         cur.close()
-    extract({
-            "name": "my_extract_name",
-            "version": "0.0.1",
-            "subgraph": "my_test_subgraph",
-            "tables": {
-                "prepaid_card_ask_sample": {
-                    "partition_sizes": [524288,32768,1024]
-                }
-            }
-        }, db_conn_string, output_folder)
+    extract(CONFIG, db_conn_string, output_folder)
     return output_folder.joinpath("my_extract_name", "0.0.1")
+
+def get_dataset(output_folder):
+    metadata_location = output_folder.joinpath("data", 
+                                               "subgraph=SUBGRAPHIPFS",
+                                               "table=prepaid_card_ask_sample",
+                                               "_metadata")
+    print(metadata_location)
+    print(metadata_location.exists())
+    return ds.parquet_dataset(metadata_location, filesystem=fs.LocalFileSystem())
 
 def test_write_out_results(db_conn_string):
     
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir = AnyPath(temp_dir)
         resulting_folder = extract_to(temp_dir, db_conn_string)
-        dataset = ds.dataset(resulting_folder.joinpath("data"), format="parquet")
+        dataset = get_dataset(resulting_folder)
         df = dataset.to_table().to_pandas()
         assert len(df) == 6
         assert resulting_folder.joinpath("latest.yaml").exists()
@@ -127,17 +137,15 @@ def test_writing_twice_when_block_increases_adds_data(db_conn_string, db_conn):
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir = AnyPath(temp_dir)
         resulting_folder = extract_to(temp_dir, db_conn_string, db_conn, 18888000)
-        dataset = ds.dataset(resulting_folder.joinpath("data"), format="parquet")
+        dataset = get_dataset(resulting_folder)
         df = dataset.to_table().to_pandas()
         assert len(df) == 2
         assert resulting_folder.joinpath("latest.yaml").exists()
     
         # Move on some blocks and run again to check we're reading in the existing config and latest.yaml
         resulting_folder = extract_to(temp_dir, db_conn_string, db_conn, 19000000)
-        dataset = ds.dataset(resulting_folder.joinpath("data"), format="parquet")
+        dataset = get_dataset(resulting_folder)
         df = dataset.to_table().to_pandas()
-        # Partitions overlap so we can just remove the duplicates
-        df = df.drop_duplicates()
         assert len(df) == 6
         assert resulting_folder.joinpath("latest.yaml").exists()
 
