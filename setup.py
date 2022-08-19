@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="subgraph_extractor",
-    version="0.1.1",
+    version="0.1.2",
     description="Pull data from graph-node databases into parquet files",
     url="http://github.com/cardstack/subgraph-extractor",
     author="Ian Calvert",
@@ -14,7 +14,7 @@ setup(
         "pyyaml",
         "sqlalchemy",
         "psycopg2-binary",
-        "pyarrow",
+        "pyarrow>=9",
         "simple-term-menu",
         "tqdm",
         "cloudpathlib[all]",
