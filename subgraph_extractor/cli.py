@@ -326,7 +326,7 @@ def extract(config, database_string, output_location):
             write_file(filepath, lambda f: pq.write_table(typed_df, f))
 
         write_parquet_metadata(table_dir, new_partitions)
-    with root_output_location.joinpath("latest.yaml").open("w") as f_out:
+    with latest_file_location.open("w") as f_out:
         yaml.dump(
             {
                 "subgraph": subgraph,
