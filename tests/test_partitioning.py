@@ -1,7 +1,7 @@
 from hypothesis import given
 from hypothesis.strategies import integers, lists, sampled_from
 
-from subgraph_extractor.cli import get_partition_iterator
+from subgraph_extractor.cli import get_partitions
 
 
 def convert_to_partition_sizes(partition_size_scales):
@@ -24,7 +24,7 @@ def convert_to_partition_sizes(partition_size_scales):
 def test_partitions(start, end, partition_sizes):
     if end < start:
         start, end = end, start
-    partitions = list(get_partition_iterator(start, end, partition_sizes))
+    partitions = get_partitions(start, end, partition_sizes)
     assert len(partitions) >= 0
 
 
@@ -40,7 +40,7 @@ def test_no_gaps_in_partitions(start, end, partition_sizes):
     if end < start:
         start, end = end, start
 
-    partitions = list(get_partition_iterator(start, end, partition_sizes))
+    partitions = get_partitions(start, end, partition_sizes)
     for partition, next_partition in zip(partitions, partitions[1:]):
         assert partition[2] == next_partition[1]
 
@@ -55,7 +55,7 @@ def test_no_gaps_in_partitions(start, end, partition_sizes):
 def test_monotonically_decreasing_partition_sizes(start, end, partition_sizes):
     if end < start:
         start, end = end, start
-    partitions = list(get_partition_iterator(start, end, partition_sizes))
+    partitions = get_partitions(start, end, partition_sizes)
     for partition, next_partition in zip(partitions, partitions[1:]):
         # The partition size should always either be the same as the one before or smaller
         # because we want _always_ to go from largest to smallest
