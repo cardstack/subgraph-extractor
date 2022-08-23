@@ -217,7 +217,7 @@ def write_config(config, root_output_location):
             yaml.dump(config, f_out)
 
 
-def remove_protocol(path):
+def remove_cloud_prefix(path):
     absolute = path.absolute()
     if isinstance(path, CloudPath):
         return absolute.as_uri().replace(absolute.cloud_prefix, "")
@@ -245,7 +245,7 @@ def write_file(filepath, write_function):
 def write_parquet_metadata(table_dir, partition_range):
     files = []
     for partition_details in partition_range:
-        files.append(remove_protocol(get_partition_file_location(
+        files.append(remove_cloud_prefix(get_partition_file_location(
             table_dir, *partition_details
         )))
     # Both absolute and as_uri are required for this to work on S3 and locally
@@ -253,7 +253,7 @@ def write_parquet_metadata(table_dir, partition_range):
     # The returned path here works without manipulation *only* for S3 so
     # can't be used later
     filesystem, _path = fs.FileSystem.from_uri(table_uri)
-    table_path = remove_protocol(table_dir)
+    table_path = remove_cloud_prefix(table_dir)
     dataset = ds.dataset(source=files, filesystem=filesystem)
     metadata = []
     # We need to replace the filename in the metadata to a relative path

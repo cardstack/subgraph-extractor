@@ -122,7 +122,6 @@ def get_dataset(output_folder):
     return ds.parquet_dataset(metadata_location, filesystem=fs.LocalFileSystem())
 
 def test_write_out_results(db_conn_string):
-    
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir = AnyPath(temp_dir)
         resulting_folder = extract_to(temp_dir, db_conn_string)
@@ -130,6 +129,37 @@ def test_write_out_results(db_conn_string):
         df = dataset.to_table().to_pandas()
         assert len(df) == 6
         assert resulting_folder.joinpath("latest.yaml").exists()
+
+def test_manually_constructing_partitons_matches_metadata_approach(db_conn_string):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir = AnyPath(temp_dir)
+        resulting_folder = extract_to(temp_dir, db_conn_string)
+        # Construct a pyarrow dataset from the metadata file
+        metadata_dataset = get_dataset(resulting_folder)
+        # Convert to a dataframe, sort to allow comparisons more easily
+        metadata_df = metadata_dataset.to_table() \
+                                      .to_pandas()\
+                                      .sort_values(by="_block_number", ignore_index=True)
+        
+        # Construct a pyarrow dataset by calculating the required partitions and constructing filenames
+        with open(resulting_folder.joinpath("latest.yaml")) as f_in:
+            export_details = yaml.safe_load(f_in)
+        earliest_block, latest_block = export_details["earliest_block"], export_details["latest_block"]
+        partition_sizes = CONFIG["tables"]["prepaid_card_ask_sample"]["partition_sizes"]
+        partitions = get_partitions(earliest_block, latest_block, partition_sizes)
+        table_dir = resulting_folder.joinpath("data", 
+                                              "subgraph=SUBGRAPHIPFS",
+                                              "table=prepaid_card_ask_sample")
+        files = [get_partition_file_location(table_dir, *partition) for partition in partitions] 
+        partition_dataset = ds.dataset(source=files, filesystem=fs.LocalFileSystem())
+        # Convert to a dataframe, sort to allow comparisons more easily
+        partition_df = partition_dataset.to_table() \
+                                        .to_pandas() \
+                                        .sort_values(by="_block_number", ignore_index=True)
+        # Check the two are identical
+        assert len(metadata_df) == 6
+        assert len(partition_df) == 6
+        pandas.testing.assert_frame_equal(partition_df, metadata_df)
 
 def test_writing_twice_when_block_increases_adds_data(db_conn_string, db_conn):
     with tempfile.TemporaryDirectory() as temp_dir:
