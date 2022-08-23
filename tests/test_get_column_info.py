@@ -159,6 +159,9 @@ def test_second_run_fills_all_data_if_crashed_in_first(db_conn_string, db_conn):
     An earlier version of the code looked at what had been written out to decide how many partitions
     needed to be written. It would encounter the *first* file a previous run had written out and
     assume that all *subsequent* files existed. This results in missing partitions.
+    
+    For a more detailed breakdown, see the PR this fix is introduced in:
+    https://github.com/cardstack/subgraph-extractor/pull/2
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         # First we need a successful run
