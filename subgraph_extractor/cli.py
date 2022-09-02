@@ -5,6 +5,8 @@ import numpy as np
 import pandas
 import pyarrow
 import pyarrow.parquet as pq
+import pyarrow.dataset as ds
+from pyarrow import fs
 import yaml
 from cloudpathlib import AnyPath, CloudPath
 from deepdiff import DeepDiff
@@ -12,41 +14,43 @@ from simple_term_menu import TerminalMenu
 from tqdm import tqdm
 import tempfile
 
-TYPE_MAPPINGS = {"numeric": "bytes", "text": "string", "boolean": "bool"}
+
+TYPE_MAPPINGS = {"numeric": "bytes", "text": "string", "boolean": "bool", "bytea": "bytes"}
 
 BLOCK_COLUMN = "_block_number"
-BLOCK_COLUMN_TYPE = pyarrow.uint32()
+BLOCK_COLUMN_TYPE = "uint32"
 
 
-def get_select_all_exclusive(
+def select_writable_in_range(
     database_string,
     subgraph_table_schema,
     table_name,
     start_partition,
     end_partition,
 ):
-
-    return pandas.read_sql(
-        sql=f"""SELECT 
-                'SELECT ' || STRING_AGG('"' || column_name || '"', ', ') || ', lower(block_range) as {BLOCK_COLUMN} 
+    """
+    This function selects all columns from a table within a set block range,
+    excluding two that appear in all subgraph model tables that cannot be
+    written to a parquet file (vid and block_range).
+    It adds in a computed colymn to ensure that the block where the fact
+    became true is still available.
+    """
+    df = pandas.read_sql(
+        sql=f"""SELECT *, lower(block_range) as {BLOCK_COLUMN} 
                     FROM {subgraph_table_schema}.{table_name}
                     WHERE
                         lower(block_range) >= %(start_partition)s
                         AND lower(block_range) < %(end_partition)s
-                    ORDER BY lower(block_range) asc'
-            FROM information_schema.columns
-            WHERE table_name = %(table_name)s
-            AND table_schema = %(subgraph_table_schema)s
-            AND column_name NOT IN ('vid', 'block_range')
+                    ORDER BY lower(block_range) asc
             """,
         params={
             "start_partition": start_partition,
             "end_partition": end_partition,
-            "table_name": table_name,
-            "subgraph_table_schema": subgraph_table_schema,
         },
         con=database_string,
-    ).iloc[0][0]
+        coerce_float=False,
+    )
+    return df.drop(["vid", "block_range"], axis=1)
 
 
 def get_column_types(database_string, subgraph_table_schema, table_name):
@@ -154,8 +158,13 @@ def convert_columns(df, database_types, table_config):
         field = schema.field(field_index)
         new_field = field.with_type(types[new_type])
         schema = schema.set(field_index, new_field)
-
-    table = table.cast(schema, safe=False)
+    if len(df) == 0:
+        # It's possible that casting an empty table causes issues
+        # but there is a helper on schemas to create a valid
+        # empty table of the same type
+        table = schema.empty_table()
+    else:
+        table = table.cast(schema, safe=False)
     return table
 
 
@@ -208,6 +217,61 @@ def write_config(config, root_output_location):
             yaml.dump(config, f_out)
 
 
+def remove_cloud_prefix(path):
+    absolute = path.absolute()
+    if isinstance(path, CloudPath):
+        return absolute.as_uri().replace(absolute.cloud_prefix, "")
+    return absolute.as_posix()
+
+def write_file(filepath, write_function):
+    """Write to local or remote filesystems transparently.
+    Safely handles pyarrow write functions that don't work
+    with cloud paths directly.
+
+    Args:
+        filepath (string): The local or remote filepath to write to
+        write_function (Callable[[string],None]): A function that takes a local filepath and writes to it
+    """
+    filepath = AnyPath(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(filepath, CloudPath):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pq_file_location = AnyPath(temp_dir).joinpath("tempfile")
+            write_function(pq_file_location)
+            filepath.upload_from(pq_file_location)
+    else:
+        write_function(filepath)
+
+def write_parquet_metadata(table_dir, partition_range):
+    files = []
+    for partition_details in partition_range:
+        files.append(remove_cloud_prefix(get_partition_file_location(
+            table_dir, *partition_details
+        )))
+    # Both absolute and as_uri are required for this to work on S3 and locally
+    table_uri = table_dir.absolute().as_uri()
+    # The returned path here works without manipulation *only* for S3 so
+    # can't be used later
+    filesystem, _path = fs.FileSystem.from_uri(table_uri)
+    table_path = remove_cloud_prefix(table_dir)
+    dataset = ds.dataset(source=files, filesystem=filesystem)
+    metadata = []
+    # We need to replace the filename in the metadata to a relative path
+    for fragment in dataset.get_fragments():
+        metadatum = fragment.metadata
+        # Here we need to make the path relative to the metadata file
+        relative_path = fragment.path.split(table_path)[1]
+        # If there's a preceeding / then you get read errors about empty path
+        # segments
+        relative_path = relative_path.lstrip("/")
+        metadatum.set_file_path(relative_path)
+        metadata.append(metadatum)
+
+    write_file(table_dir.joinpath("_metadata"), lambda f: pq.write_metadata(
+        dataset.schema, f,
+        metadata_collector=metadata
+    ))
+
 def extract(config, database_string, output_location):
     """Connects to your database and pulls all data from all subgraphs"""
 
@@ -251,29 +315,18 @@ def extract(config, database_string, output_location):
             filepath = get_partition_file_location(
                 table_dir, partition_size, start_partition, end_partition
             )
-            df = pandas.read_sql(
-                sql=get_select_all_exclusive(
+            df = select_writable_in_range(
                     database_string,
                     subgraph_table_schema,
                     table_name,
                     start_partition=start_partition,
                     end_partition=end_partition,
-                ),
-                con=database_string,
-                coerce_float=False,
-            )
+                )
             typed_df = convert_columns(df, database_types, table_config)
-            # Pyarrow can't take a file object so we have to write to a temp file
-            # and upload directly
-            filepath.parent.mkdir(parents=True, exist_ok=True)
-            if isinstance(filepath, CloudPath):
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    pq_file_location = AnyPath(temp_dir).joinpath("data.parquet")
-                    pq.write_table(typed_df, pq_file_location)
-                    filepath.upload_from(pq_file_location)
-            else:
-                pq.write_table(typed_df, filepath)
-    with root_output_location.joinpath("latest.yaml").open("w") as f_out:
+            write_file(filepath, lambda f: pq.write_table(typed_df, f))
+
+        write_parquet_metadata(table_dir, new_partitions)
+    with latest_file_location.open("w") as f_out:
         yaml.dump(
             {
                 "subgraph": subgraph,
