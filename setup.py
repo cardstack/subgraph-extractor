@@ -4,6 +4,8 @@ setup(
     name="subgraph_extractor",
     version="0.2.0",
     description="Pull data from graph-node databases into parquet files",
+    long_description="Pull data from graph-node databases into parquet files with hierarchal partitioning",
+    long_description_content_type="text/plain",
     url="http://github.com/cardstack/subgraph-extractor",
     author="Ian Calvert",
     author_email="ian.calvert@cardstack.com",
