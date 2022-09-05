@@ -289,7 +289,7 @@ def extract(config, database_string, output_location):
 
     if latest_file_location.exists():
         with latest_file_location.open("r") as f_in:
-            previous_run_data = yaml.load(f_in)
+            previous_run_data = yaml.safe_load(f_in)
     else:
         previous_run_data = {}
 
