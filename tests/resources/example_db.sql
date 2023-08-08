@@ -78,8 +78,7 @@ CREATE TABLE subgraphs.subgraph_deployment (
   entity_count numeric NOT NULL,
   latest_ethereum_block_number numeric NULL,
   latest_ethereum_block_hash bytea NULL,
-  earliest_ethereum_block_number numeric NULL,
-  earliest_ethereum_block_hash bytea NULL,
+  earliest_block_number numeric NULL,
   synced boolean NOT NULL,
   failed boolean NOT NULL,
   deployment text NOT NULL
@@ -103,7 +102,6 @@ insert into subgraphs.subgraph_deployment values (
     19000000,
     NULL,
     18000000,
-    NULL,
     TRUE,
     FALSE,
     'SUBGRAPHIPFS'
