@@ -77,7 +77,7 @@ def get_subgraph_table_schemas(database_string):
   ds.name AS subgraph_table_schema,
   sv.id,
   s.name as label,
-  sd.earliest_ethereum_block_number::int as earliest_block,
+  sd.earliest_block_number::int as earliest_block,
   sd.latest_ethereum_block_number::int as latest_block
 FROM
   deployment_schemas ds
